@@ -1,0 +1,811 @@
+import streamlit as st
+import pandas as pd
+import math
+import random
+import json
+import os
+import io
+import requests
+import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+from fpdf import FPDF
+
+# ─────────────────────────────────────────────
+#  KONFIGURATION & SICHERHEIT
+# ─────────────────────────────────────────────
+STORAGE_FILE = "data_storage.json"
+PASSWORD = "SGE#2026adds"          # Besser: st.secrets["password"] verwenden
+MAX_V_ITER  = 2000                 # Schutz vor Endlosschleife beim Vereinspuffer
+
+
+# ─────────────────────────────────────────────
+#  LOGIN
+# ─────────────────────────────────────────────
+def check_password():
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+    if not st.session_state.authenticated:
+        st.title("🔐 Login")
+        pwd = st.text_input("Passwort:", type="password")
+        if st.button("Anmelden"):
+            if pwd == PASSWORD:
+                st.session_state.authenticated = True
+                st.rerun()
+            else:
+                st.error("Falsches Passwort!")
+        return False
+    return True
+
+
+# ─────────────────────────────────────────────
+#  DATENPERSISTENZ
+# ─────────────────────────────────────────────
+def save_data():
+    data = {
+        "events": st.session_state.events,
+        "grassfish_config": st.session_state.get("grassfish_config", {})
+    }
+    with open(STORAGE_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+
+
+def load_data():
+    if os.path.exists(STORAGE_FILE):
+        try:
+            with open(STORAGE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            st.session_state.events          = data.get("events", [])
+            st.session_state.grassfish_config = data.get("grassfish_config", {})
+        except json.JSONDecodeError as e:
+            st.warning(f"JSON-Fehler beim Laden: {e}. Starte mit leeren Daten.")
+            _reset_session()
+        except (KeyError, TypeError) as e:
+            st.warning(f"Strukturfehler: {e}. Starte mit leeren Daten.")
+            _reset_session()
+        except OSError as e:
+            st.error(f"Datei konnte nicht geöffnet werden: {e}")
+            _reset_session()
+    else:
+        _reset_session()
+
+    if not st.session_state.events:
+        st.session_state.events = [make_default_event("Standard-Event")]
+
+
+def _reset_session():
+    st.session_state.events           = []
+    st.session_state.grassfish_config = {}
+
+
+def make_default_event(name: str) -> dict:
+    return {
+        "name": name,
+        "config": {
+            "input_mode":     "Laufzeit (Minuten)",
+            "total_event_min": 60,
+            "pkg_S": 2.0,  "pkg_M": 5.0,  "pkg_L": 10.0,  "pkg_XL": 20.0,
+            "dur_S": 5.0,  "dur_M": 10.0, "dur_L": 20.0,  "dur_XL": 40.0
+        },
+        "spots": []
+    }
+
+
+# ─────────────────────────────────────────────
+#  HILFSFUNKTIONEN
+# ─────────────────────────────────────────────
+def compute_internal_pct(cfg: dict) -> dict:
+    """Liefert Prozentwert pro Paket, unabhängig vom Eingabemodus."""
+    mode      = cfg["input_mode"]
+    total_min = cfg["total_event_min"]
+    pct = {}
+    for p in ["S", "M", "L", "XL"]:
+        if mode == "Laufzeit (Minuten)":
+            pct[p] = (cfg[f"dur_{p}"] / total_min * 100) if total_min > 0 else 0.0
+        else:
+            pct[p] = cfg[f"pkg_{p}"]
+    return pct
+
+
+# ─────────────────────────────────────────────
+#  PLAYLIST-GENERIERUNG (OPTIMIERT)
+# ─────────────────────────────────────────────
+def generate_playlist(event: dict, play_mode: str):
+    """
+    Erzeugt eine Loop-Playlist mit minimaler Spotanzahl.
+    Gibt (DataFrame, loop_duration_sek, error_string) zurück.
+    """
+    spots        = event["spots"]
+    cfg          = event["config"]
+    internal_pct = compute_internal_pct(cfg)
+
+    df_all       = pd.DataFrame(spots)
+    sponsoren_df = df_all[df_all["Typ"] != "Verein (Puffer)"].copy()
+    vereins_df   = df_all[df_all["Typ"] == "Verein (Puffer)"].copy()
+
+    if sponsoren_df.empty:
+        return None, None, "Keine Sponsoren-Spots vorhanden."
+
+    # ── Minimale Loop-Länge berechnen ──────────────────────────────────
+    def min_loop_for_spot(row):
+        pct = internal_pct.get(row["Typ"], 0)
+        return (row["Dauer"] / (pct / 100)) if pct > 0 else 999_999
+
+    sponsoren_df["Min_Loop_Req"] = sponsoren_df.apply(min_loop_for_spot, axis=1)
+    base_loop     = sponsoren_df["Min_Loop_Req"].max()
+
+    min_v_time    = vereins_df["Dauer"].sum() if not vereins_df.empty else 0
+    s_pct_sum     = sum(internal_pct.get(t, 0) for t in sponsoren_df["Typ"])
+    v_pct_avail   = max(1.0, 100.0 - s_pct_sum)
+    loop_for_v    = (min_v_time / (v_pct_avail / 100)) if (v_pct_avail > 0 and min_v_time > 0) else base_loop
+    loop_duration = max(base_loop, loop_for_v)
+
+    # ── Sponsoren-Pool ─────────────────────────────────────────────────
+    s_pool = []
+    for _, row in sponsoren_df.iterrows():
+        wdh = math.ceil((loop_duration * (internal_pct[row["Typ"]] / 100)) / row["Dauer"])
+        for _ in range(wdh):
+            s_pool.append({
+                "id":    str(row["id"]),
+                "Name":  row["Name"],
+                "Dauer": int(row["Dauer"]),
+                "Typ":   row["Typ"]
+            })
+
+    # ── Vereins-Pool (mit Schutz vor Endlosschleife) ───────────────────
+    v_list      = vereins_df.to_dict("records") if not vereins_df.empty else []
+    v_instances = []
+    if v_list:
+        s_total_time = sum(s["Dauer"] for s in s_pool)
+        v_counter    = 0
+        for _ in range(MAX_V_ITER):
+            v_total = sum(v["Dauer"] for v in v_instances)
+            if (s_total_time + v_total) >= loop_duration and v_counter >= len(v_list):
+                break
+            entry = dict(v_list[v_counter % len(v_list)])
+            entry["id"] = str(entry["id"])
+            v_instances.append(entry)
+            v_counter += 1
+
+    # ── Anordnung ──────────────────────────────────────────────────────
+    pkg_order = {"XL": 1, "L": 2, "M": 3, "S": 4}
+    final_playlist = []
+
+    if play_mode == "Durchmischt":
+        random.shuffle(s_pool)
+        v_idx = 0
+        for s in s_pool:
+            final_playlist.append(s)
+            if v_idx < len(v_instances):
+                final_playlist.append(v_instances[v_idx])
+                v_idx += 1
+        while v_idx < len(v_instances):
+            final_playlist.append(v_instances[v_idx])
+            v_idx += 1
+
+    elif "zuerst" in play_mode:
+        s_pool.sort(key=lambda x: pkg_order.get(x["Typ"], 5))
+        final_playlist = s_pool + v_instances
+
+    else:  # Sponsoren zuletzt
+        s_pool.sort(key=lambda x: pkg_order.get(x["Typ"], 5))
+        final_playlist = v_instances + s_pool
+
+    # ── DataFrame aufbauen ────────────────────────────────────────────
+    res_df = pd.DataFrame(final_playlist)
+    t_acc, start_times = 0, []
+    for d in res_df["Dauer"]:
+        start_times.append(f"{int(t_acc//60):02d}:{int(t_acc%60):02d}")
+        t_acc += d
+    res_df.insert(0, "Start im Loop", start_times)
+
+    return res_df, loop_duration, None
+
+
+# ─────────────────────────────────────────────
+#  TIMELINE-VISUALISIERUNG (Plotly)
+# ─────────────────────────────────────────────
+TYP_COLORS = {
+    "S":              "#3498db",
+    "M":              "#2ecc71",
+    "L":              "#f39c12",
+    "XL":             "#e74c3c",
+    "Verein (Puffer)":"#95a5a6"
+}
+
+def show_timeline(res_df: pd.DataFrame):
+    fig = go.Figure()
+    t   = 0
+    for _, row in res_df.iterrows():
+        color = TYP_COLORS.get(row["Typ"], "#cccccc")
+        label = str(row["Name"])[:18]
+        fig.add_trace(go.Bar(
+            x=[row["Dauer"]],
+            base=[t],
+            y=[row["Typ"]],
+            orientation="h",
+            marker_color=color,
+            marker_line=dict(color="white", width=0.8),
+            text=label,
+            textposition="inside",
+            insidetextanchor="middle",
+            hovertemplate=(
+                f"<b>{row['Name']}</b><br>"
+                f"Start: {row['Start im Loop']}<br>"
+                f"Dauer: {row['Dauer']} s<br>"
+                f"Typ: {row['Typ']}<extra></extra>"
+            ),
+            showlegend=False,
+            name=row["Name"]
+        ))
+        t += row["Dauer"]
+
+    # Legende manuell
+    for typ, col in TYP_COLORS.items():
+        fig.add_trace(go.Bar(
+            x=[0], y=[typ], orientation="h",
+            marker_color=col, showlegend=True,
+            name=typ, visible="legendonly"
+        ))
+
+    fig.update_layout(
+        title=dict(text="⏱️ Loop-Timeline", font=dict(size=16)),
+        xaxis=dict(title="Zeit (Sekunden)", tickformat="d"),
+        yaxis=dict(title="", categoryorder="array",
+                   categoryarray=["S", "M", "L", "XL", "Verein (Puffer)"]),
+        barmode="stack",
+        height=280,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        plot_bgcolor="#0e1117",
+        paper_bgcolor="#0e1117",
+        font=dict(color="white"),
+        margin=dict(l=10, r=10, t=50, b=40)
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+# ─────────────────────────────────────────────
+#  PDF-EXPORT
+# ─────────────────────────────────────────────
+def create_pdf(df: pd.DataFrame, fig_buffer, event_name: str) -> bytes:
+    pdf = FPDF()
+    pdf.add_page()
+
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(0, 10, f"Loop-Playliste: {event_name}", ln=True, align="C")
+    pdf.ln(6)
+
+    pdf.set_font("Helvetica", "B", 10)
+    col_w = (pdf.w - 20) / 5
+    for h in ["Start", "Name", "Dauer", "Typ", "ID"]:
+        pdf.cell(col_w, 9, h, border=1, align="C")
+    pdf.ln()
+
+    pdf.set_font("Helvetica", "", 9)
+    for _, row in df.iterrows():
+        name_str = str(row["Name"])
+        display  = (name_str[:20] + "..") if len(name_str) > 22 else name_str
+        pdf.cell(col_w, 7, str(row["Start im Loop"]), border=1)
+        pdf.cell(col_w, 7, display,                   border=1)
+        pdf.cell(col_w, 7, f"{row['Dauer']}s",         border=1)
+        pdf.cell(col_w, 7, str(row["Typ"]),            border=1)
+        pdf.cell(col_w, 7, str(row["id"]),             border=1)
+        pdf.ln()
+
+    if fig_buffer:
+        pdf.ln(6)
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.cell(0, 9, "Zeitverteilung", ln=True)
+        img_path = "/tmp/temp_plot.png"
+        with open(img_path, "wb") as f:
+            f.write(fig_buffer.getvalue())
+        pdf.image(img_path, x=10, y=pdf.get_y(), w=110)
+
+    return bytes(pdf.output())
+
+
+# ─────────────────────────────────────────────
+#  GRASSFISH API-HELFER
+# ─────────────────────────────────────────────
+def _gf_headers():
+    return {"Content-Type": "application/json", "Accept": "application/json"}
+
+def gf_login(base: str, user: str, pwd: str) -> str:
+    """Liefert SessionId zurück."""
+    url  = f"{base.rstrip('/')}/gv2/webservices/API/Versions/login"
+    resp = requests.post(url, json={"UserName": user, "Password": pwd},
+                         headers=_gf_headers(), timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    sid  = data.get("SessionId") or data.get("sessionId") or data.get("token")
+    if not sid:
+        raise ValueError(f"Kein SessionId in Antwort: {data}")
+    return sid
+
+def gf_get_folder_spots(base: str, sid: str, folder_id: str) -> list:
+    url  = f"{base.rstrip('/')}/gv2/webservices/API/Spots"
+    resp = requests.get(url, params={"sessionId": sid, "folderId": folder_id},
+                        headers=_gf_headers(), timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    return data if isinstance(data, list) else data.get("Items", data.get("items", []))
+
+def gf_get_playlists(base: str, sid: str) -> list:
+    url  = f"{base.rstrip('/')}/gv2/webservices/API/Playlists"
+    resp = requests.get(url, params={"sessionId": sid},
+                        headers=_gf_headers(), timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    return data if isinstance(data, list) else data.get("Items", data.get("items", []))
+
+def gf_clear_playlist(base: str, sid: str, pl_id) -> None:
+    url  = f"{base.rstrip('/')}/gv2/webservices/API/Playlists/{pl_id}/Spots"
+    resp = requests.delete(url, params={"sessionId": sid},
+                           headers=_gf_headers(), timeout=15)
+    resp.raise_for_status()
+
+def gf_push_playlist(base: str, sid: str, pl_id, spot_ids: list) -> dict:
+    url  = f"{base.rstrip('/')}/gv2/webservices/API/Playlists/{pl_id}/Spots"
+    body = [{"SpotId": int(sid_), "Position": i + 1} for i, sid_ in enumerate(spot_ids)]
+    resp = requests.put(url, params={"sessionId": sid}, json=body,
+                        headers=_gf_headers(), timeout=30)
+    resp.raise_for_status()
+    return resp.json() if resp.content else {}
+
+
+# ─────────────────────────────────────────────
+#  PAKET-BELEGUNG SIDEBAR
+# ─────────────────────────────────────────────
+def render_sidebar_usage(event: dict):
+    cfg          = event["config"]
+    spots        = event["spots"]
+    internal_pct = compute_internal_pct(cfg)
+
+    st.sidebar.subheader("📊 Paket-Belegung")
+    allocated_total = 0.0
+    for p in ["S", "M", "L", "XL"]:
+        has_spots = any(s["Typ"] == p for s in spots)
+        pct_val   = internal_pct[p]
+        allocated_total += pct_val
+        label = f"Paket {p}: {pct_val:.1f}%"
+        bar   = min(1.0, pct_val / 100.0)
+        if has_spots:
+            st.sidebar.progress(bar, text=f"✅ {label}")
+        else:
+            st.sidebar.progress(0.0, text=f"⬜ {label} (kein Spot)")
+
+    remaining = max(0.0, 100.0 - allocated_total)
+    bar_r     = min(1.0, remaining / 100.0)
+    st.sidebar.progress(bar_r, text=f"🔵 Verein/frei: {remaining:.1f}%")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  HAUPTPROGRAMM
+# ═══════════════════════════════════════════════════════════════════════
+if check_password():
+
+    if "events" not in st.session_state:
+        load_data()
+    if "grassfish_config" not in st.session_state:
+        st.session_state.grassfish_config = {}
+
+    st.set_page_config(page_title="Stadion Ad-Manager", layout="wide", page_icon="🏟️")
+    st.title("🏟️ Stadion Ad-Inventory Manager")
+
+    # ─── TABS ──────────────────────────────────────────────────────────
+    tab_events, tab_grassfish = st.tabs(["📋  Events & Playlisten", "🔌  Grassfish-Integration"])
+
+    # ══════════════════════════════════════════════════════════════════
+    #  TAB 1: EVENTS & PLAYLISTEN
+    # ══════════════════════════════════════════════════════════════════
+    with tab_events:
+
+        # ── SIDEBAR ────────────────────────────────────────────────────
+        st.sidebar.header("⚙️ Event-Verwaltung")
+
+        if st.sidebar.button("💾 Alle Daten speichern"):
+            save_data()
+            st.sidebar.success("Gespeichert!")
+
+        if st.sidebar.button("🚪 Abmelden"):
+            st.session_state.authenticated = False
+            st.rerun()
+
+        # Event auswählen / anlegen
+        event_names = [e["name"] for e in st.session_state.events]
+
+        with st.sidebar.expander("➕ Neues Event anlegen"):
+            new_ev_name = st.text_input("Name", key="new_ev_name")
+            if st.button("Event erstellen", key="btn_create_ev"):
+                stripped = new_ev_name.strip()
+                if not stripped:
+                    st.warning("Bitte einen Namen eingeben.")
+                elif stripped in event_names:
+                    st.warning(f"'{stripped}' existiert bereits.")
+                else:
+                    st.session_state.events.append(make_default_event(stripped))
+                    save_data()
+                    st.rerun()
+
+        sel_ev_name = st.sidebar.selectbox("Aktives Event", event_names, key="sel_event")
+        ev_idx      = event_names.index(sel_ev_name)
+        event       = st.session_state.events[ev_idx]
+
+        if len(st.session_state.events) > 1:
+            if st.sidebar.button(f"🗑️ '{sel_ev_name}' löschen"):
+                st.session_state.events.pop(ev_idx)
+                save_data()
+                st.rerun()
+
+        st.sidebar.divider()
+
+        # ── Konfiguration des aktiven Events ──────────────────────────
+        st.sidebar.subheader("📐 Konfiguration")
+        cfg = event["config"]
+
+        input_mode = st.sidebar.radio(
+            "Berechnungs-Basis", ["Prozent", "Laufzeit (Minuten)"],
+            index=0 if cfg["input_mode"] == "Prozent" else 1,
+            key=f"mode_{ev_idx}"
+        )
+        cfg["input_mode"] = input_mode
+
+        total_min = st.sidebar.number_input(
+            "Event-Dauer (Minuten)", min_value=1,
+            value=int(cfg["total_event_min"]), key=f"totmin_{ev_idx}"
+        )
+        cfg["total_event_min"] = total_min
+
+        st.sidebar.subheader("📦 Paket-Werte")
+        for p in ["S", "M", "L", "XL"]:
+            cfg_key = f"pkg_{p}" if input_mode == "Prozent" else f"dur_{p}"
+            unit    = "%" if input_mode == "Prozent" else "Min"
+            val     = st.sidebar.number_input(
+                f"Paket {p} ({unit})", min_value=0.0,
+                value=float(cfg.get(cfg_key, 0.0)),
+                step=0.5, key=f"pkg_{p}_{ev_idx}"
+            )
+            cfg[cfg_key] = val
+
+        # Paket-Belegung Fortschrittsbalken
+        render_sidebar_usage(event)
+
+        # ── MAIN CONTENT ───────────────────────────────────────────────
+        st.header(f"📋 Event: **{sel_ev_name}**")
+
+        col_main, col_stats = st.columns([3, 1])
+        spots = event["spots"]
+
+        with col_stats:
+            st.metric("Spots gesamt",    len(spots))
+            n_sponsor = sum(1 for s in spots if s["Typ"] != "Verein (Puffer)")
+            n_verein  = len(spots) - n_sponsor
+            st.metric("Sponsoren-Spots", n_sponsor)
+            st.metric("Vereins-Spots",   n_verein)
+            internal_pct = compute_internal_pct(cfg)
+            used_pct = sum(internal_pct[t] for t in ["S","M","L","XL"]
+                           if any(s["Typ"] == t for s in spots))
+            st.metric("Gebuchte %",      f"{used_pct:.1f}%")
+
+        with col_main:
+            # ── Spot hinzufügen ────────────────────────────────────────
+            with st.expander("➕ Spot manuell hinzufügen", expanded=True):
+                with st.form("add_form", clear_on_submit=True):
+                    c1, c2, c3 = st.columns([3, 1, 2])
+                    new_name = c1.text_input("Dateiname / Bezeichnung")
+                    new_dur  = c2.number_input("Dauer (Sek.)", min_value=1, value=30)
+                    new_pkg  = c3.selectbox("Typ", ["S", "M", "L", "XL", "Verein (Puffer)"])
+                    submitted = st.form_submit_button("➕ Hinzufügen")
+
+                    if submitted:
+                        stripped_name = new_name.strip()
+                        if not stripped_name:
+                            st.warning("Bitte einen Dateinamen eingeben.")
+                        elif any(s["Name"] == stripped_name and s["Typ"] == new_pkg
+                                 for s in spots):
+                            st.warning(
+                                f"⚠️ **Duplikat erkannt:** '{stripped_name}' "
+                                f"mit Typ '{new_pkg}' ist bereits in der Liste."
+                            )
+                        else:
+                            spots.append({
+                                "id":    random.randint(10000, 99999),
+                                "Name":  stripped_name,
+                                "Dauer": new_dur,
+                                "Typ":   new_pkg
+                            })
+                            save_data()
+                            st.rerun()
+
+            # ── Spot-Liste anzeigen ────────────────────────────────────
+            if spots:
+                for spot in spots:
+                    cn, cd, ct, cb = st.columns([3, 1, 2, 1])
+                    cn.text(spot["Name"])
+                    cd.text(f"{spot['Dauer']} s")
+                    ct.text(f"Typ: {spot['Typ']}")
+                    if cb.button("🗑️", key=f"del_{spot['id']}_{ev_idx}",
+                                 help="Spot entfernen"):
+                        event["spots"] = [s for s in spots if s["id"] != spot["id"]]
+                        save_data()
+                        st.rerun()
+            else:
+                st.info("Noch keine Spots vorhanden. Füge Spots manuell hinzu oder importiere sie über die Grassfish-Integration.")
+
+        # ── PLAYLIST GENERATOR ─────────────────────────────────────────
+        if spots:
+            st.divider()
+            st.subheader("🚀 Playlist generieren")
+
+            play_mode = st.radio(
+                "Ausspielungs-Modus",
+                ["Durchmischt", "Block: Sponsoren zuerst", "Block: Sponsoren zuletzt"],
+                horizontal=True,
+                key=f"pm_{ev_idx}"
+            )
+
+            if st.button("🎬 Playlist jetzt generieren", type="primary"):
+                res_df, loop_dur, err = generate_playlist(event, play_mode)
+                if err:
+                    st.error(err)
+                else:
+                    st.session_state[f"pl_{ev_idx}"]       = res_df
+                    st.session_state[f"pl_dur_{ev_idx}"]   = loop_dur
+
+            # ── Ergebnis anzeigen ──────────────────────────────────────
+            if f"pl_{ev_idx}" in st.session_state:
+                res_df   = st.session_state[f"pl_{ev_idx}"]
+                loop_dur = st.session_state[f"pl_dur_{ev_idx}"]
+                total_s  = res_df["Dauer"].sum()
+
+                c1, c2, c3 = st.columns(3)
+                c1.success(f"⏱ Loop-Dauer: **{int(loop_dur//60)} m {int(loop_dur%60)} s**")
+                c2.info(f"📦 Spots in Playlist: **{len(res_df)}**")
+                c3.info(f"🕐 Gesamtlaufzeit: **{total_s} s**")
+
+                # Timeline
+                show_timeline(res_df)
+
+                # Tabelle
+                st.dataframe(
+                    res_df[["Start im Loop", "Name", "Dauer", "Typ", "id"]],
+                    use_container_width=True,
+                    column_config={
+                        "Dauer": st.column_config.Column("Dauer (s)", width="small"),
+                        "id":    st.column_config.Column("GF-ID",     width="small")
+                    }
+                )
+
+                # Export-Buttons
+                col_csv, col_pdf = st.columns(2)
+
+                with col_csv:
+                    csv_bytes = res_df.to_csv(index=False, sep=";").encode("utf-8-sig")
+                    st.download_button(
+                        "📥 CSV exportieren",
+                        data=csv_bytes,
+                        file_name=f"playlist_{sel_ev_name}.csv",
+                        mime="text/csv"
+                    )
+
+                with col_pdf:
+                    # Tortendiagramm für PDF
+                    plot_data  = res_df.groupby(["Name", "Typ"])["Dauer"].sum().reset_index()
+                    fig_p, ax  = plt.subplots(figsize=(4, 4))
+                    cmap       = plt.get_cmap("tab20")
+                    pie_colors = [
+                        cmap(i % 20) if t != "Verein (Puffer)" else "#d3d3d3"
+                        for i, t in enumerate(plot_data["Typ"])
+                    ]
+                    ax.pie(
+                        plot_data["Dauer"],
+                        labels=plot_data["Name"],
+                        autopct="%1.1f%%",
+                        startangle=90,
+                        colors=pie_colors,
+                        wedgeprops={"edgecolor": "black", "linewidth": 0.5},
+                        textprops={"fontsize": 7}
+                    )
+                    ax.axis("equal")
+                    buf = io.BytesIO()
+                    fig_p.savefig(buf, format="png", bbox_inches="tight", dpi=150)
+                    plt.close(fig_p)
+
+                    pdf_bytes = create_pdf(
+                        res_df[["Start im Loop", "Name", "Dauer", "Typ", "id"]],
+                        buf, sel_ev_name
+                    )
+                    st.download_button(
+                        "📄 PDF exportieren",
+                        data=pdf_bytes,
+                        file_name=f"playlist_{sel_ev_name}.pdf",
+                        mime="application/pdf"
+                    )
+
+    # ══════════════════════════════════════════════════════════════════
+    #  TAB 2: GRASSFISH INTEGRATION
+    # ══════════════════════════════════════════════════════════════════
+    with tab_grassfish:
+        st.header("🔌 Grassfish Digital Signage Integration")
+        st.markdown(
+            "Verbinde dich mit deinem Grassfish-Server, importiere Inhalte aus einem Ordner, "
+            "klassifiziere sie und übertrage die generierte Playlist direkt ins System."
+        )
+
+        gf_cfg = st.session_state.grassfish_config
+
+        # ── Verbindungseinstellungen ────────────────────────────────────
+        with st.expander("🔑 Verbindungseinstellungen", expanded=True):
+            cg1, cg2, cg3 = st.columns(3)
+            gf_url  = cg1.text_input("Server-URL",    value=gf_cfg.get("url", "https://ds.evisco.com"),
+                                      placeholder="https://ihr-server.com")
+            gf_user = cg2.text_input("Benutzername",   value=gf_cfg.get("username", ""))
+            gf_pass = cg3.text_input("Passwort",        type="password")
+
+            gf_cfg["url"]      = gf_url
+            gf_cfg["username"] = gf_user
+
+            if st.button("🔗 Verbindung testen & anmelden"):
+                if not all([gf_url, gf_user, gf_pass]):
+                    st.error("Bitte alle Felder ausfüllen.")
+                else:
+                    try:
+                        with st.spinner("Verbinde ..."):
+                            sid = gf_login(gf_url, gf_user, gf_pass)
+                            st.session_state["gf_session"] = sid
+                        st.success(f"✅ Erfolgreich eingeloggt! Session-ID: {sid[:8]}…")
+                    except requests.HTTPError as e:
+                        st.error(f"HTTP-Fehler: {e.response.status_code} – {e.response.text[:200]}")
+                    except requests.ConnectionError:
+                        st.error("Verbindung fehlgeschlagen. Server erreichbar?")
+                    except Exception as e:
+                        st.error(f"Fehler: {e}")
+
+        st.divider()
+
+        # ── Schritte nebeneinander ──────────────────────────────────────
+        step1, step2, step3 = st.columns([1, 1, 1])
+
+        # ── SCHRITT 1: Ordner importieren ───────────────────────────────
+        with step1:
+            st.subheader("1️⃣  Content importieren")
+            folder_id = st.text_input("Ordner-ID", value=gf_cfg.get("folder_id", ""),
+                                       placeholder="z.B. 42", key="gf_folder_id")
+            gf_cfg["folder_id"] = folder_id
+
+            if st.button("📂 Ordner laden", key="btn_load_folder"):
+                sid = st.session_state.get("gf_session")
+                if not sid:
+                    st.warning("Zuerst einloggen (oben).")
+                elif not folder_id:
+                    st.warning("Bitte Ordner-ID eingeben.")
+                else:
+                    try:
+                        with st.spinner("Lade Inhalte..."):
+                            contents = gf_get_folder_spots(gf_url, sid, folder_id)
+                            st.session_state["gf_folder_contents"] = contents
+                        st.success(f"✅ {len(contents)} Inhalte geladen.")
+                    except requests.HTTPError as e:
+                        st.error(f"HTTP-Fehler: {e.response.status_code}")
+                    except Exception as e:
+                        st.error(f"Fehler: {e}")
+
+            if "gf_folder_contents" in st.session_state:
+                c = st.session_state["gf_folder_contents"]
+                st.caption(f"{len(c)} Inhalte im Speicher")
+                preview = [
+                    {"Name": item.get("Name", item.get("name", "?")),
+                     "Dauer": item.get("Duration", item.get("duration", "?")),
+                     "ID":    item.get("Id",   item.get("id", "?"))}
+                    for item in c[:10]
+                ]
+                st.dataframe(pd.DataFrame(preview), use_container_width=True, hide_index=True)
+
+        # ── SCHRITT 2: Klassifizieren & übernehmen ─────────────────────
+        with step2:
+            st.subheader("2️⃣  Klassifizieren")
+            if "gf_folder_contents" not in st.session_state:
+                st.info("Zuerst Ordner laden (Schritt 1).")
+            else:
+                contents    = st.session_state["gf_folder_contents"]
+                ev_names_g  = [e["name"] for e in st.session_state.events]
+                target_ev   = st.selectbox("Ziel-Event", ev_names_g, key="gf_target_ev")
+                target_ev_i = ev_names_g.index(target_ev)
+
+                if "gf_cls" not in st.session_state:
+                    st.session_state["gf_cls"] = {}
+
+                with st.form("classify_form"):
+                    for item in contents:
+                        iid   = str(item.get("Id",       item.get("id",       "")))
+                        iname = str(item.get("Name",     item.get("name",     "?")))
+                        idur  = int(item.get("Duration", item.get("duration", 30)))
+                        cn, ct = st.columns([3, 2])
+                        cn.caption(f"**{iname[:28]}**\n{idur} s | ID {iid}")
+                        cls_val = ct.selectbox(
+                            "", ["Ignorieren", "S", "M", "L", "XL", "Verein (Puffer)"],
+                            key=f"cls_{iid}"
+                        )
+                        st.session_state["gf_cls"][iid] = {
+                            "name": iname, "duration": idur,
+                            "type": cls_val, "gf_id": iid
+                        }
+
+                    if st.form_submit_button("✅ In Event übernehmen"):
+                        added = dupes = 0
+                        tev   = st.session_state.events[target_ev_i]
+                        for iid, cd in st.session_state["gf_cls"].items():
+                            if cd["type"] == "Ignorieren":
+                                continue
+                            if any(s["Name"] == cd["name"] and s["Typ"] == cd["type"]
+                                   for s in tev["spots"]):
+                                dupes += 1
+                                continue
+                            tev["spots"].append({
+                                "id":    cd["gf_id"],
+                                "Name":  cd["name"],
+                                "Dauer": int(cd["duration"]),
+                                "Typ":   cd["type"]
+                            })
+                            added += 1
+                        save_data()
+                        st.success(f"✅ {added} Spots hinzugefügt, {dupes} Duplikate übersprungen.")
+
+        # ── SCHRITT 3: Playlist pushen ─────────────────────────────────
+        with step3:
+            st.subheader("3️⃣  Playlist pushen")
+            ev_names_p = [e["name"] for e in st.session_state.events]
+            push_ev    = st.selectbox("Event mit Playlist", ev_names_p, key="gf_push_ev")
+            push_ev_i  = ev_names_p.index(push_ev)
+
+            if f"pl_{push_ev_i}" not in st.session_state:
+                st.info("Zuerst Playlist im Tab 'Events & Playlisten' generieren.")
+            else:
+                res_push = st.session_state[f"pl_{push_ev_i}"]
+                st.caption(f"Bereit: {len(res_push)} Spots")
+
+                if st.button("🔄 GF-Playlisten laden", key="btn_load_pls"):
+                    sid = st.session_state.get("gf_session")
+                    if not sid:
+                        st.warning("Bitte zuerst einloggen.")
+                    else:
+                        try:
+                            with st.spinner("Lade Playlisten..."):
+                                pls = gf_get_playlists(gf_url, sid)
+                                st.session_state["gf_playlists"] = pls
+                            st.success(f"{len(pls)} Playlisten geladen.")
+                        except Exception as e:
+                            st.error(f"Fehler: {e}")
+
+                if "gf_playlists" in st.session_state:
+                    pls = st.session_state["gf_playlists"]
+                    pl_map = {
+                        f"{p.get('Name', p.get('name','?'))}  (ID {p.get('Id', p.get('id','?'))})":
+                        p.get("Id", p.get("id"))
+                        for p in pls
+                    }
+                    sel_pl_name = st.selectbox("Ziel-Playlist in Grassfish", list(pl_map.keys()))
+                    sel_pl_id   = pl_map[sel_pl_name]
+
+                    clear_opt = st.checkbox("Playlist vorher leeren", value=True,
+                                             help="Empfohlen, um Fehler durch veraltete Einträge zu vermeiden.")
+
+                    if st.button("🚀 Playlist übertragen", type="primary"):
+                        sid = st.session_state.get("gf_session")
+                        if not sid:
+                            st.warning("Bitte zuerst einloggen.")
+                        else:
+                            try:
+                                spot_ids = res_push["id"].tolist()
+                                with st.spinner("Übertrage …"):
+                                    if clear_opt:
+                                        gf_clear_playlist(gf_url, sid, sel_pl_id)
+                                    gf_push_playlist(gf_url, sid, sel_pl_id, spot_ids)
+                                st.success(f"✅ {len(spot_ids)} Spots erfolgreich in Grassfish übertragen!")
+                                st.balloons()
+                            except requests.HTTPError as e:
+                                st.error(
+                                    f"HTTP-Fehler beim Push: {e.response.status_code}\n"
+                                    f"{e.response.text[:300]}"
+                                )
+                            except Exception as e:
+                                st.error(f"Fehler beim Push: {e}")
