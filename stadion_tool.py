@@ -429,26 +429,30 @@ def gf_get_spotgroups(server: str, api_key: str, version: str) -> list:
 
 def gf_get_playlists(server: str, api_key: str, version: str) -> tuple:
     """
-    Versucht Playlists mit mehreren API-Versionen zu laden.
-    Gibt (liste, verwendete_version) zurück.
+    Probiert systematisch alle bekannten Versionen × Endpunkt-Namen.
+    Gibt (liste, beschreibung, probe_log) zurück.
+    probe_log = [(url, status_code_oder_fehler), ...]
     """
-    # Versionen in Reihenfolge probieren: zuerst die konfigurierte, dann Alternativen
-    versions_to_try = [version] + [v for v in ["1", "1.12", "1.1", "2", "1.0"] if v != version]
-    last_err = None
+    versions_to_try   = [version] + [v for v in ["1.12","1","1.1","1.2","2","1.0"] if v != version]
+    endpoints_to_try  = ["Playlists","playlists","PlaylistGroups","Playlist","ChannelPlaylists"]
+    probe_log = []
+
     for ver in versions_to_try:
-        try:
-            url  = f"{_gf_base(server, ver)}/Playlists"
-            resp = requests.get(url, headers=_gf_headers(api_key), timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
-            items = data if isinstance(data, list) else data.get("Items", data.get("items", []))
-            return items, ver
-        except requests.HTTPError as e:
-            last_err = e
-            if e.response.status_code not in (400, 404):
-                raise  # anderer Fehler → sofort werfen
-            continue
-    raise last_err
+        for ep in endpoints_to_try:
+            url = f"{_gf_base(server, ver)}/{ep}"
+            try:
+                resp = requests.get(url, headers=_gf_headers(api_key), timeout=10)
+                probe_log.append((url, resp.status_code))
+                if resp.status_code == 200:
+                    data  = resp.json()
+                    items = data if isinstance(data, list) else data.get("Items", data.get("items", []))
+                    return items, f"v{ver}/{ep}", probe_log
+            except requests.ConnectionError as e:
+                probe_log.append((url, f"ConnErr: {e}"))
+            except Exception as e:
+                probe_log.append((url, str(e)[:60]))
+
+    raise RuntimeError("Kein funktionierender Playlists-Endpunkt gefunden.")
 
 def gf_clear_playlist(server: str, api_key: str, version: str, pl_id) -> None:
     url  = f"{_gf_base(server, version)}/Playlists/{pl_id}/Spots"
@@ -960,15 +964,19 @@ if check_password():
                         st.warning("Bitte zuerst API-Key eingeben und Verbindung testen.")
                     else:
                         try:
-                            with st.spinner("Lade Playlisten..."):
-                                pls, used_ver = gf_get_playlists(gf_url, _key, _ver)
-                                st.session_state["gf_playlists"] = pls
-                                st.session_state["gf_pl_version"] = used_ver
-                            if used_ver != _ver:
-                                st.info(f"ℹ️ Playlists gefunden mit API-Version **{used_ver}** (statt {_ver}). Bitte Version in den Verbindungseinstellungen auf **{used_ver}** ändern.")
-                            st.success(f"✅ {len(pls)} Playlisten geladen (v{used_ver}).")
-                        except requests.HTTPError as e:
-                            st.error(f"HTTP-Fehler {e.response.status_code}: {e.response.text[:200]}")
+                            with st.spinner("Lade Playlisten (probiere Endpunkte) …"):
+                                pls, used_desc, probe_log = gf_get_playlists(gf_url, _key, _ver)
+                                st.session_state["gf_playlists"]  = pls
+                                st.session_state["gf_pl_version"] = used_desc.split("/")[0].lstrip("v")
+                                st.session_state["gf_pl_probe"]   = probe_log
+                            st.success(f"✅ {len(pls)} Playlisten geladen via `{used_desc}`")
+                        except RuntimeError as e:
+                            probe_log = st.session_state.get("gf_pl_probe", [])
+                            st.error(str(e))
+                            with st.expander("🔍 Debug: alle geprüften Endpunkte"):
+                                for url, status in probe_log:
+                                    icon = "✅" if status == 200 else "❌"
+                                    st.caption(f"{icon} `{status}` → {url}")
                         except Exception as e:
                             st.error(f"Fehler: {e}")
 
