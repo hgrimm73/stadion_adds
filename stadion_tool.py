@@ -452,7 +452,8 @@ def gf_get_playlists(server: str, api_key: str, version: str) -> tuple:
             except Exception as e:
                 probe_log.append((url, str(e)[:60]))
 
-    raise RuntimeError("Kein funktionierender Playlists-Endpunkt gefunden.")
+    # Probe-Log in einer globalen Variable für die UI zugänglich machen
+    raise RuntimeError(f"__PROBE_LOG__{repr(probe_log)}__END__Kein funktionierender Playlists-Endpunkt gefunden.")
 
 def gf_clear_playlist(server: str, api_key: str, version: str, pl_id) -> None:
     url  = f"{_gf_base(server, version)}/Playlists/{pl_id}/Spots"
@@ -971,12 +972,25 @@ if check_password():
                                 st.session_state["gf_pl_probe"]   = probe_log
                             st.success(f"✅ {len(pls)} Playlisten geladen via `{used_desc}`")
                         except RuntimeError as e:
-                            probe_log = st.session_state.get("gf_pl_probe", [])
-                            st.error(str(e))
-                            with st.expander("🔍 Debug: alle geprüften Endpunkte"):
-                                for url, status in probe_log:
-                                    icon = "✅" if status == 200 else "❌"
-                                    st.caption(f"{icon} `{status}` → {url}")
+                            msg = str(e)
+                            probe_log = []
+                            if "__PROBE_LOG__" in msg:
+                                try:
+                                    import ast as _ast
+                                    log_str = msg.split("__PROBE_LOG__")[1].split("__END__")[0]
+                                    probe_log = _ast.literal_eval(log_str)
+                                    msg = msg.split("__END__")[1]
+                                except Exception:
+                                    pass
+                            st.error(msg)
+                            with st.expander("🔍 Debug: alle geprüften Endpunkte", expanded=True):
+                                if probe_log:
+                                    for url, status in probe_log:
+                                        icon = "✅" if status == 200 else "❌"
+                                        st.caption(f"{icon} `{status}` → {url}")
+                                else:
+                                    st.warning("Keine Endpunkte wurden erreicht – möglicherweise Netzwerk- oder TLS-Problem.")
+                                    st.caption(f"Geprüfte Server-URL: `{gf_url}`")
                         except Exception as e:
                             st.error(f"Fehler: {e}")
 
