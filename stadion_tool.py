@@ -55,7 +55,7 @@ def load_data():
             with open(STORAGE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             st.session_state.events          = data.get("events", [])
-            st.session_state.grassfish_config = data.get("grassfish_config", {})
+            st.session_state.grassfish_config = _migrate_grassfish_config(data.get("grassfish_config", {}))
         except json.JSONDecodeError as e:
             st.warning(f"JSON-Fehler beim Laden: {e}. Starte mit leeren Daten.")
             _reset_session()
@@ -75,6 +75,12 @@ def load_data():
 def _reset_session():
     st.session_state.events           = []
     st.session_state.grassfish_config = {}
+
+def _migrate_grassfish_config(cfg: dict) -> dict:
+    """Migriert alte Configs – stellt sicher dass Version nicht '1' ist."""
+    if cfg.get("version") == "1":
+        cfg["version"] = "1.12"
+    return cfg
 
 
 def make_default_event(name: str) -> dict:
@@ -305,49 +311,114 @@ def create_pdf(df: pd.DataFrame, fig_buffer, event_name: str) -> bytes:
 
 # ─────────────────────────────────────────────
 #  GRASSFISH API-HELFER
+#  Auth: X-ApiKey Header (empfohlen laut Grassfish-Docs)
+#  Basis: {server}/gv2/webservices/API/v{version}/{resource}
 # ─────────────────────────────────────────────
-def _gf_headers():
-    return {"Content-Type": "application/json", "Accept": "application/json"}
+def _gf_headers(api_key: str) -> dict:
+    return {
+        "Content-Type": "application/json",
+        "Accept":       "application/json",
+        "X-ApiKey":     api_key
+    }
 
-def gf_login(base: str, user: str, pwd: str) -> str:
-    """Liefert SessionId zurück."""
-    url  = f"{base.rstrip('/')}/gv2/webservices/API/Versions/login"
-    resp = requests.post(url, json={"UserName": user, "Password": pwd},
-                         headers=_gf_headers(), timeout=15)
+def _gf_base(server: str, version: str) -> str:
+    return f"{server.rstrip('/')}/gv2/webservices/API/v{version}"
+
+def gf_test_connection(server: str, api_key: str, version: str) -> dict:
+    """Testet die Verbindung durch Abruf der Server-Version/Lizenz."""
+    url  = f"{_gf_base(server, version)}/Licenses"
+    resp = requests.get(url, headers=_gf_headers(api_key), timeout=10)
     resp.raise_for_status()
-    data = resp.json()
-    sid  = data.get("SessionId") or data.get("sessionId") or data.get("token")
-    if not sid:
-        raise ValueError(f"Kein SessionId in Antwort: {data}")
-    return sid
+    return resp.json()
 
-def gf_get_folder_spots(base: str, sid: str, folder_id: str) -> list:
-    url  = f"{base.rstrip('/')}/gv2/webservices/API/Spots"
-    resp = requests.get(url, params={"sessionId": sid, "folderId": folder_id},
-                        headers=_gf_headers(), timeout=15)
+def gf_get_folder_spots(server: str, api_key: str, version: str, folder_id: str) -> list:
+    """
+    Versucht mehrere Endpunkte in dieser Reihenfolge:
+    1. /SpotGroups/{id}/Spots  (Grassfish-nativer Ordner-Endpunkt)
+    2. /Spots?spotGroupId={id}
+    3. /Spots?superSpotGroupId={id}
+    4. /Spots + client-seitiger Filter nach bekannten Gruppen-Feldern
+    Gibt Tupel (spots_list, strategy_used, raw_sample) zurück.
+    """
+    base = _gf_base(server, version)
+    hdrs = _gf_headers(api_key)
+
+    # Strategie 1: SpotGroups/{id}/Spots
+    try:
+        url  = f"{base}/SpotGroups/{folder_id}/Spots"
+        resp = requests.get(url, headers=hdrs, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        spots = data if isinstance(data, list) else data.get("Items", data.get("items", []))
+        if spots:
+            return spots, "SpotGroups/{id}/Spots", spots[:1]
+    except Exception:
+        pass
+
+    # Strategie 2: ?spotGroupId=
+    try:
+        resp = requests.get(f"{base}/Spots", params={"spotGroupId": folder_id},
+                            headers=hdrs, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        spots = data if isinstance(data, list) else data.get("Items", data.get("items", []))
+        if spots:
+            return spots, "Spots?spotGroupId", spots[:1]
+    except Exception:
+        pass
+
+    # Strategie 3: ?superSpotGroupId=
+    try:
+        resp = requests.get(f"{base}/Spots", params={"superSpotGroupId": folder_id},
+                            headers=hdrs, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        spots = data if isinstance(data, list) else data.get("Items", data.get("items", []))
+        if spots:
+            return spots, "Spots?superSpotGroupId", spots[:1]
+    except Exception:
+        pass
+
+    # Strategie 4: Alle laden, client-seitig filtern
+    resp  = requests.get(f"{base}/Spots", headers=hdrs, timeout=30)
+    resp.raise_for_status()
+    data  = resp.json()
+    all_spots = data if isinstance(data, list) else data.get("Items", data.get("items", []))
+    sample    = all_spots[:1]
+    fid_str   = str(folder_id)
+    group_keys = ["SpotGroupId","spotGroupId","SuperSpotGroupId","superSpotGroupId",
+                   "FolderId","folderId","GroupId","groupId","CustomerGroupId"]
+    for key in group_keys:
+        filtered = [s for s in all_spots if str(s.get(key,"")) == fid_str]
+        if filtered:
+            return filtered, f"Alle Spots → Filter '{key}'=={fid_str}", sample
+    # Kein Filter griff – alle zurückgeben damit User debuggen kann
+    return all_spots, f"KEIN FILTER GEFUNDEN – alle {len(all_spots)} Spots geladen", sample
+
+def gf_get_spotgroups(server: str, api_key: str, version: str) -> list:
+    """Lädt alle SpotGroups (= Ordner) für die Ordner-Auswahl."""
+    url  = f"{_gf_base(server, version)}/SpotGroups"
+    resp = requests.get(url, headers=_gf_headers(api_key), timeout=15)
     resp.raise_for_status()
     data = resp.json()
     return data if isinstance(data, list) else data.get("Items", data.get("items", []))
 
-def gf_get_playlists(base: str, sid: str) -> list:
-    url  = f"{base.rstrip('/')}/gv2/webservices/API/Playlists"
-    resp = requests.get(url, params={"sessionId": sid},
-                        headers=_gf_headers(), timeout=15)
+def gf_get_playlists(server: str, api_key: str, version: str) -> list:
+    url  = f"{_gf_base(server, version)}/Playlists"
+    resp = requests.get(url, headers=_gf_headers(api_key), timeout=15)
     resp.raise_for_status()
     data = resp.json()
     return data if isinstance(data, list) else data.get("Items", data.get("items", []))
 
-def gf_clear_playlist(base: str, sid: str, pl_id) -> None:
-    url  = f"{base.rstrip('/')}/gv2/webservices/API/Playlists/{pl_id}/Spots"
-    resp = requests.delete(url, params={"sessionId": sid},
-                           headers=_gf_headers(), timeout=15)
+def gf_clear_playlist(server: str, api_key: str, version: str, pl_id) -> None:
+    url  = f"{_gf_base(server, version)}/Playlists/{pl_id}/Spots"
+    resp = requests.delete(url, headers=_gf_headers(api_key), timeout=15)
     resp.raise_for_status()
 
-def gf_push_playlist(base: str, sid: str, pl_id, spot_ids: list) -> dict:
-    url  = f"{base.rstrip('/')}/gv2/webservices/API/Playlists/{pl_id}/Spots"
-    body = [{"SpotId": int(sid_), "Position": i + 1} for i, sid_ in enumerate(spot_ids)]
-    resp = requests.put(url, params={"sessionId": sid}, json=body,
-                        headers=_gf_headers(), timeout=30)
+def gf_push_playlist(server: str, api_key: str, version: str, pl_id, spot_ids: list) -> dict:
+    url  = f"{_gf_base(server, version)}/Playlists/{pl_id}/Spots"
+    body = [{"SpotId": int(s), "Position": i + 1} for i, s in enumerate(spot_ids)]
+    resp = requests.put(url, json=body, headers=_gf_headers(api_key), timeout=30)
     resp.raise_for_status()
     return resp.json() if resp.content else {}
 
@@ -518,14 +589,14 @@ if check_password():
 
             # ── Spot-Liste anzeigen ────────────────────────────────────
             if spots:
-                for spot in spots:
+                for s_i, spot in enumerate(spots):
                     cn, cd, ct, cb = st.columns([3, 1, 2, 1])
                     cn.text(spot["Name"])
                     cd.text(f"{spot['Dauer']} s")
                     ct.text(f"Typ: {spot['Typ']}")
-                    if cb.button("🗑️", key=f"del_{spot['id']}_{ev_idx}",
+                    if cb.button("🗑️", key=f"del_{ev_idx}_{s_i}_{spot['id']}",
                                  help="Spot entfernen"):
-                        event["spots"] = [s for s in spots if s["id"] != spot["id"]]
+                        event["spots"] = [s for j, s in enumerate(spots) if j != s_i]
                         save_data()
                         st.rerun()
             else:
@@ -635,30 +706,50 @@ if check_password():
 
         # ── Verbindungseinstellungen ────────────────────────────────────
         with st.expander("🔑 Verbindungseinstellungen", expanded=True):
-            cg1, cg2, cg3 = st.columns(3)
-            gf_url  = cg1.text_input("Server-URL",    value=gf_cfg.get("url", "https://ds.evisco.com"),
-                                      placeholder="https://ihr-server.com")
-            gf_user = cg2.text_input("Benutzername",   value=gf_cfg.get("username", ""))
-            gf_pass = cg3.text_input("Passwort",        type="password")
+            st.info(
+                "Die Grassfish-API verwendet **API-Key-Authentifizierung** (`X-ApiKey` Header). "
+                "Den API-Key findest du im Grassfish Manager unter *Administration → API-Zugang*.",
+                icon="ℹ️"
+            )
+            cg1, cg2, cg3 = st.columns([3, 2, 1])
+            gf_url     = cg1.text_input("Server-URL", value=gf_cfg.get("url", "https://ds.evisco.com"),
+                                         placeholder="https://ihr-server.com")
+            gf_api_key = cg2.text_input("API-Key (X-ApiKey)", value=gf_cfg.get("api_key", ""),
+                                         type="password", placeholder="Dein Grassfish API-Key")
+            gf_version = cg3.text_input("API-Version", value=gf_cfg.get("version", "1.12"),
+                                         help="Standard: 1.12  (für ältere Instanzen ggf. 1)")
 
-            gf_cfg["url"]      = gf_url
-            gf_cfg["username"] = gf_user
+            gf_cfg["url"]     = gf_url
+            gf_cfg["api_key"] = gf_api_key
+            gf_cfg["version"] = gf_version
 
-            if st.button("🔗 Verbindung testen & anmelden"):
-                if not all([gf_url, gf_user, gf_pass]):
-                    st.error("Bitte alle Felder ausfüllen.")
+            if st.button("🔗 Verbindung testen"):
+                if not all([gf_url, gf_api_key]):
+                    st.error("Bitte Server-URL und API-Key ausfüllen.")
                 else:
                     try:
-                        with st.spinner("Verbinde ..."):
-                            sid = gf_login(gf_url, gf_user, gf_pass)
-                            st.session_state["gf_session"] = sid
-                        st.success(f"✅ Erfolgreich eingeloggt! Session-ID: {sid[:8]}…")
+                        with st.spinner("Verbinde …"):
+                            gf_test_connection(gf_url, gf_api_key, gf_version)
+                            st.session_state["gf_connected"] = True
+                        st.success("✅ Verbindung erfolgreich! API antwortet korrekt.")
                     except requests.HTTPError as e:
-                        st.error(f"HTTP-Fehler: {e.response.status_code} – {e.response.text[:200]}")
+                        st.session_state["gf_connected"] = False
+                        st.error(
+                            f"HTTP-Fehler {e.response.status_code}: {e.response.text[:300]}\n\n"
+                            f"**Geprüfte URL:** `{gf_url}/gv2/webservices/API/v{gf_version}/Licenses`\n\n"
+                            "Bitte API-Version prüfen (z.B. `1` oder `1.12`)."
+                        )
                     except requests.ConnectionError:
-                        st.error("Verbindung fehlgeschlagen. Server erreichbar?")
+                        st.session_state["gf_connected"] = False
+                        st.error(f"Verbindung zu `{gf_url}` fehlgeschlagen. Server erreichbar?")
                     except Exception as e:
+                        st.session_state["gf_connected"] = False
                         st.error(f"Fehler: {e}")
+
+        if st.session_state.get("gf_connected"):
+            st.success("🟢 Verbunden mit Grassfish")
+        else:
+            st.warning("🔴 Noch nicht verbunden – bitte oben Verbindung testen.")
 
         st.divider()
 
@@ -668,37 +759,96 @@ if check_password():
         # ── SCHRITT 1: Ordner importieren ───────────────────────────────
         with step1:
             st.subheader("1️⃣  Content importieren")
-            folder_id = st.text_input("Ordner-ID", value=gf_cfg.get("folder_id", ""),
+            _key = gf_cfg.get("api_key", "")
+            _ver = gf_cfg.get("version", "1.12")
+
+            # Ordner-Browser
+            if st.button("🗂️ Verfügbare Ordner (SpotGroups) anzeigen", key="btn_browse_folders"):
+                if not _key:
+                    st.warning("Bitte zuerst API-Key eingeben und Verbindung testen.")
+                else:
+                    try:
+                        with st.spinner("Lade SpotGroups …"):
+                            groups = gf_get_spotgroups(gf_url, _key, _ver)
+                            st.session_state["gf_spotgroups"] = groups
+                    except requests.HTTPError as e:
+                        st.error(f"HTTP-Fehler {e.response.status_code}: {e.response.text[:200]}")
+                    except Exception as e:
+                        st.error(f"Fehler beim Laden der SpotGroups: {e}")
+
+            if "gf_spotgroups" in st.session_state:
+                grps = st.session_state["gf_spotgroups"]
+                if grps:
+                    grp_rows = [
+                        {"ID":   str(g.get("Id",   g.get("id",   "?"))),
+                         "Name": str(g.get("Name", g.get("name", "?"))),
+                         "SuperID": str(g.get("SuperSpotGroupId",
+                                              g.get("superSpotGroupId", "–")))}
+                        for g in grps
+                    ]
+                    st.dataframe(pd.DataFrame(grp_rows), use_container_width=True,
+                                 hide_index=True, height=180)
+                    st.caption("👆 Notiere die ID des gewünschten Ordners und trage sie unten ein.")
+                else:
+                    st.info("Keine SpotGroups gefunden – ggf. andere API-Version?")
+
+            st.divider()
+
+            folder_id = st.text_input("Ordner-ID eingeben", value=gf_cfg.get("folder_id", ""),
                                        placeholder="z.B. 42", key="gf_folder_id")
             gf_cfg["folder_id"] = folder_id
 
             if st.button("📂 Ordner laden", key="btn_load_folder"):
-                sid = st.session_state.get("gf_session")
-                if not sid:
-                    st.warning("Zuerst einloggen (oben).")
+                if not _key:
+                    st.warning("Bitte zuerst API-Key eingeben und Verbindung testen.")
                 elif not folder_id:
                     st.warning("Bitte Ordner-ID eingeben.")
                 else:
                     try:
-                        with st.spinner("Lade Inhalte..."):
-                            contents = gf_get_folder_spots(gf_url, sid, folder_id)
-                            st.session_state["gf_folder_contents"] = contents
-                        st.success(f"✅ {len(contents)} Inhalte geladen.")
+                        with st.spinner("Lade Inhalte (versuche mehrere Endpunkte) …"):
+                            spots, strategy, sample = gf_get_folder_spots(
+                                gf_url, _key, _ver, folder_id)
+                            st.session_state["gf_folder_contents"] = spots
+                            st.session_state["gf_load_strategy"]   = strategy
+                            st.session_state["gf_raw_sample"]      = sample
                     except requests.HTTPError as e:
-                        st.error(f"HTTP-Fehler: {e.response.status_code}")
+                        st.error(f"HTTP-Fehler {e.response.status_code}: {e.response.text[:300]}")
                     except Exception as e:
                         st.error(f"Fehler: {e}")
 
             if "gf_folder_contents" in st.session_state:
-                c = st.session_state["gf_folder_contents"]
-                st.caption(f"{len(c)} Inhalte im Speicher")
+                spots    = st.session_state["gf_folder_contents"]
+                strategy = st.session_state.get("gf_load_strategy", "?")
+
+                if "KEIN FILTER" in strategy:
+                    st.warning(
+                        f"⚠️ {strategy}\n\n"
+                        "Kein passender Ordner-Filter gefunden. Bitte schau dir den "
+                        "**Debug: Rohstruktur** unten an und teile mit, welches Feld "
+                        "die Ordner-Zugehörigkeit speichert."
+                    )
+                else:
+                    st.success(f"✅ **{len(spots)} Spots** geladen via `{strategy}`")
+
                 preview = [
-                    {"Name": item.get("Name", item.get("name", "?")),
-                     "Dauer": item.get("Duration", item.get("duration", "?")),
-                     "ID":    item.get("Id",   item.get("id", "?"))}
-                    for item in c[:10]
+                    {"Name":  str(s.get("Name",     s.get("name",     "?"))),
+                     "Dauer": str(s.get("Duration", s.get("duration", "?"))),
+                     "ID":    str(s.get("Id",       s.get("id",       "?")))}
+                    for s in spots[:15]
                 ]
-                st.dataframe(pd.DataFrame(preview), use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame(preview), use_container_width=True,
+                             hide_index=True, height=220)
+
+                # Debug-Panel
+                with st.expander("🔍 Debug: Rohstruktur eines Spots (alle Felder)"):
+                    sample = st.session_state.get("gf_raw_sample", spots[:1])
+                    if sample:
+                        st.json(sample[0])
+                        st.caption(
+                            "👆 Hier siehst du alle Felder eines Spots. Prüfe, "
+                            "welches Feld die Ordner-ID enthält (z.B. SpotGroupId, "
+                            "SuperSpotGroupId, CustomerId …)"
+                        )
 
         # ── SCHRITT 2: Klassifizieren & übernehmen ─────────────────────
         with step2:
@@ -715,7 +865,7 @@ if check_password():
                     st.session_state["gf_cls"] = {}
 
                 with st.form("classify_form"):
-                    for item in contents:
+                    for c_i, item in enumerate(contents):
                         iid   = str(item.get("Id",       item.get("id",       "")))
                         iname = str(item.get("Name",     item.get("name",     "?")))
                         idur  = int(item.get("Duration", item.get("duration", 30)))
@@ -723,7 +873,7 @@ if check_password():
                         cn.caption(f"**{iname[:28]}**\n{idur} s | ID {iid}")
                         cls_val = ct.selectbox(
                             "", ["Ignorieren", "S", "M", "L", "XL", "Verein (Puffer)"],
-                            key=f"cls_{iid}"
+                            key=f"cls_{c_i}_{iid}"
                         )
                         st.session_state["gf_cls"][iid] = {
                             "name": iname, "duration": idur,
@@ -764,15 +914,18 @@ if check_password():
                 st.caption(f"Bereit: {len(res_push)} Spots")
 
                 if st.button("🔄 GF-Playlisten laden", key="btn_load_pls"):
-                    sid = st.session_state.get("gf_session")
-                    if not sid:
-                        st.warning("Bitte zuerst einloggen.")
+                    _key = gf_cfg.get("api_key", "")
+                    _ver = gf_cfg.get("version", "1.12")
+                    if not _key:
+                        st.warning("Bitte zuerst API-Key eingeben und Verbindung testen.")
                     else:
                         try:
                             with st.spinner("Lade Playlisten..."):
-                                pls = gf_get_playlists(gf_url, sid)
+                                pls = gf_get_playlists(gf_url, _key, _ver)
                                 st.session_state["gf_playlists"] = pls
                             st.success(f"{len(pls)} Playlisten geladen.")
+                        except requests.HTTPError as e:
+                            st.error(f"HTTP-Fehler {e.response.status_code}: {e.response.text[:200]}")
                         except Exception as e:
                             st.error(f"Fehler: {e}")
 
@@ -790,16 +943,17 @@ if check_password():
                                              help="Empfohlen, um Fehler durch veraltete Einträge zu vermeiden.")
 
                     if st.button("🚀 Playlist übertragen", type="primary"):
-                        sid = st.session_state.get("gf_session")
-                        if not sid:
-                            st.warning("Bitte zuerst einloggen.")
+                        _key = gf_cfg.get("api_key", "")
+                        _ver = gf_cfg.get("version", "1.12")
+                        if not _key:
+                            st.warning("Bitte zuerst API-Key eingeben und Verbindung testen.")
                         else:
                             try:
                                 spot_ids = res_push["id"].tolist()
                                 with st.spinner("Übertrage …"):
                                     if clear_opt:
-                                        gf_clear_playlist(gf_url, sid, sel_pl_id)
-                                    gf_push_playlist(gf_url, sid, sel_pl_id, spot_ids)
+                                        gf_clear_playlist(gf_url, _key, _ver, sel_pl_id)
+                                    gf_push_playlist(gf_url, _key, _ver, sel_pl_id, spot_ids)
                                 st.success(f"✅ {len(spot_ids)} Spots erfolgreich in Grassfish übertragen!")
                                 st.balloons()
                             except requests.HTTPError as e:
