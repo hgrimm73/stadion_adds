@@ -326,9 +326,73 @@ def gf_test_connection(server: str, api_key: str, version: str) -> dict:
     return resp.json()
 
 def gf_get_folder_spots(server: str, api_key: str, version: str, folder_id: str) -> list:
-    url  = f"{_gf_base(server, version)}/Spots"
-    resp = requests.get(url, params={"folderId": folder_id},
-                        headers=_gf_headers(api_key), timeout=15)
+    """
+    Versucht mehrere Endpunkte in dieser Reihenfolge:
+    1. /SpotGroups/{id}/Spots  (Grassfish-nativer Ordner-Endpunkt)
+    2. /Spots?spotGroupId={id}
+    3. /Spots?superSpotGroupId={id}
+    4. /Spots + client-seitiger Filter nach bekannten Gruppen-Feldern
+    Gibt Tupel (spots_list, strategy_used, raw_sample) zurück.
+    """
+    base = _gf_base(server, version)
+    hdrs = _gf_headers(api_key)
+
+    # Strategie 1: SpotGroups/{id}/Spots
+    try:
+        url  = f"{base}/SpotGroups/{folder_id}/Spots"
+        resp = requests.get(url, headers=hdrs, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        spots = data if isinstance(data, list) else data.get("Items", data.get("items", []))
+        if spots:
+            return spots, "SpotGroups/{id}/Spots", spots[:1]
+    except Exception:
+        pass
+
+    # Strategie 2: ?spotGroupId=
+    try:
+        resp = requests.get(f"{base}/Spots", params={"spotGroupId": folder_id},
+                            headers=hdrs, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        spots = data if isinstance(data, list) else data.get("Items", data.get("items", []))
+        if spots:
+            return spots, "Spots?spotGroupId", spots[:1]
+    except Exception:
+        pass
+
+    # Strategie 3: ?superSpotGroupId=
+    try:
+        resp = requests.get(f"{base}/Spots", params={"superSpotGroupId": folder_id},
+                            headers=hdrs, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        spots = data if isinstance(data, list) else data.get("Items", data.get("items", []))
+        if spots:
+            return spots, "Spots?superSpotGroupId", spots[:1]
+    except Exception:
+        pass
+
+    # Strategie 4: Alle laden, client-seitig filtern
+    resp  = requests.get(f"{base}/Spots", headers=hdrs, timeout=30)
+    resp.raise_for_status()
+    data  = resp.json()
+    all_spots = data if isinstance(data, list) else data.get("Items", data.get("items", []))
+    sample    = all_spots[:1]
+    fid_str   = str(folder_id)
+    group_keys = ["SpotGroupId","spotGroupId","SuperSpotGroupId","superSpotGroupId",
+                   "FolderId","folderId","GroupId","groupId","CustomerGroupId"]
+    for key in group_keys:
+        filtered = [s for s in all_spots if str(s.get(key,"")) == fid_str]
+        if filtered:
+            return filtered, f"Alle Spots → Filter '{key}'=={fid_str}", sample
+    # Kein Filter griff – alle zurückgeben damit User debuggen kann
+    return all_spots, f"KEIN FILTER GEFUNDEN – alle {len(all_spots)} Spots geladen", sample
+
+def gf_get_spotgroups(server: str, api_key: str, version: str) -> list:
+    """Lädt alle SpotGroups (= Ordner) für die Ordner-Auswahl."""
+    url  = f"{_gf_base(server, version)}/SpotGroups"
+    resp = requests.get(url, headers=_gf_headers(api_key), timeout=15)
     resp.raise_for_status()
     data = resp.json()
     return data if isinstance(data, list) else data.get("Items", data.get("items", []))
@@ -646,8 +710,8 @@ if check_password():
                                          placeholder="https://ihr-server.com")
             gf_api_key = cg2.text_input("API-Key (X-ApiKey)", value=gf_cfg.get("api_key", ""),
                                          type="password", placeholder="Dein Grassfish API-Key")
-            gf_version = cg3.text_input("API-Version", value=gf_cfg.get("version", "1"),
-                                         help="Standard: 1  (für ältere Instanzen z.B. 1.12)")
+            gf_version = cg3.text_input("API-Version", value=gf_cfg.get("version", "1.12"),
+                                         help="Standard: 1.12  (für ältere Instanzen ggf. 1)")
 
             gf_cfg["url"]     = gf_url
             gf_cfg["api_key"] = gf_api_key
@@ -689,38 +753,96 @@ if check_password():
         # ── SCHRITT 1: Ordner importieren ───────────────────────────────
         with step1:
             st.subheader("1️⃣  Content importieren")
-            folder_id = st.text_input("Ordner-ID", value=gf_cfg.get("folder_id", ""),
+            _key = gf_cfg.get("api_key", "")
+            _ver = gf_cfg.get("version", "1.12")
+
+            # Ordner-Browser
+            if st.button("🗂️ Verfügbare Ordner (SpotGroups) anzeigen", key="btn_browse_folders"):
+                if not _key:
+                    st.warning("Bitte zuerst API-Key eingeben und Verbindung testen.")
+                else:
+                    try:
+                        with st.spinner("Lade SpotGroups …"):
+                            groups = gf_get_spotgroups(gf_url, _key, _ver)
+                            st.session_state["gf_spotgroups"] = groups
+                    except requests.HTTPError as e:
+                        st.error(f"HTTP-Fehler {e.response.status_code}: {e.response.text[:200]}")
+                    except Exception as e:
+                        st.error(f"Fehler beim Laden der SpotGroups: {e}")
+
+            if "gf_spotgroups" in st.session_state:
+                grps = st.session_state["gf_spotgroups"]
+                if grps:
+                    grp_rows = [
+                        {"ID":   str(g.get("Id",   g.get("id",   "?"))),
+                         "Name": str(g.get("Name", g.get("name", "?"))),
+                         "SuperID": str(g.get("SuperSpotGroupId",
+                                              g.get("superSpotGroupId", "–")))}
+                        for g in grps
+                    ]
+                    st.dataframe(pd.DataFrame(grp_rows), use_container_width=True,
+                                 hide_index=True, height=180)
+                    st.caption("👆 Notiere die ID des gewünschten Ordners und trage sie unten ein.")
+                else:
+                    st.info("Keine SpotGroups gefunden – ggf. andere API-Version?")
+
+            st.divider()
+
+            folder_id = st.text_input("Ordner-ID eingeben", value=gf_cfg.get("folder_id", ""),
                                        placeholder="z.B. 42", key="gf_folder_id")
             gf_cfg["folder_id"] = folder_id
 
             if st.button("📂 Ordner laden", key="btn_load_folder"):
-                _key = gf_cfg.get("api_key", "")
-                _ver = gf_cfg.get("version", "1")
                 if not _key:
-                    st.warning("Bitte zuerst Verbindung testen (API-Key eingeben).")
+                    st.warning("Bitte zuerst API-Key eingeben und Verbindung testen.")
                 elif not folder_id:
                     st.warning("Bitte Ordner-ID eingeben.")
                 else:
                     try:
-                        with st.spinner("Lade Inhalte..."):
-                            contents = gf_get_folder_spots(gf_url, _key, _ver, folder_id)
-                            st.session_state["gf_folder_contents"] = contents
-                        st.success(f"✅ {len(contents)} Inhalte geladen.")
+                        with st.spinner("Lade Inhalte (versuche mehrere Endpunkte) …"):
+                            spots, strategy, sample = gf_get_folder_spots(
+                                gf_url, _key, _ver, folder_id)
+                            st.session_state["gf_folder_contents"] = spots
+                            st.session_state["gf_load_strategy"]   = strategy
+                            st.session_state["gf_raw_sample"]      = sample
                     except requests.HTTPError as e:
-                        st.error(f"HTTP-Fehler {e.response.status_code}: {e.response.text[:200]}")
+                        st.error(f"HTTP-Fehler {e.response.status_code}: {e.response.text[:300]}")
                     except Exception as e:
                         st.error(f"Fehler: {e}")
 
             if "gf_folder_contents" in st.session_state:
-                c = st.session_state["gf_folder_contents"]
-                st.caption(f"{len(c)} Inhalte im Speicher")
+                spots    = st.session_state["gf_folder_contents"]
+                strategy = st.session_state.get("gf_load_strategy", "?")
+
+                if "KEIN FILTER" in strategy:
+                    st.warning(
+                        f"⚠️ {strategy}\n\n"
+                        "Kein passender Ordner-Filter gefunden. Bitte schau dir den "
+                        "**Debug: Rohstruktur** unten an und teile mit, welches Feld "
+                        "die Ordner-Zugehörigkeit speichert."
+                    )
+                else:
+                    st.success(f"✅ **{len(spots)} Spots** geladen via `{strategy}`")
+
                 preview = [
-                    {"Name": item.get("Name", item.get("name", "?")),
-                     "Dauer": item.get("Duration", item.get("duration", "?")),
-                     "ID":    item.get("Id",   item.get("id", "?"))}
-                    for item in c[:10]
+                    {"Name":  str(s.get("Name",     s.get("name",     "?"))),
+                     "Dauer": str(s.get("Duration", s.get("duration", "?"))),
+                     "ID":    str(s.get("Id",       s.get("id",       "?")))}
+                    for s in spots[:15]
                 ]
-                st.dataframe(pd.DataFrame(preview), use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame(preview), use_container_width=True,
+                             hide_index=True, height=220)
+
+                # Debug-Panel
+                with st.expander("🔍 Debug: Rohstruktur eines Spots (alle Felder)"):
+                    sample = st.session_state.get("gf_raw_sample", spots[:1])
+                    if sample:
+                        st.json(sample[0])
+                        st.caption(
+                            "👆 Hier siehst du alle Felder eines Spots. Prüfe, "
+                            "welches Feld die Ordner-ID enthält (z.B. SpotGroupId, "
+                            "SuperSpotGroupId, CustomerId …)"
+                        )
 
         # ── SCHRITT 2: Klassifizieren & übernehmen ─────────────────────
         with step2:
