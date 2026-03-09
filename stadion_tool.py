@@ -55,7 +55,7 @@ def load_data():
             with open(STORAGE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             st.session_state.events          = data.get("events", [])
-            st.session_state.grassfish_config = data.get("grassfish_config", {})
+            st.session_state.grassfish_config = _migrate_grassfish_config(data.get("grassfish_config", {}))
         except json.JSONDecodeError as e:
             st.warning(f"JSON-Fehler beim Laden: {e}. Starte mit leeren Daten.")
             _reset_session()
@@ -75,6 +75,12 @@ def load_data():
 def _reset_session():
     st.session_state.events           = []
     st.session_state.grassfish_config = {}
+
+def _migrate_grassfish_config(cfg: dict) -> dict:
+    """Migriert alte Configs – stellt sicher dass Version nicht '1' ist."""
+    if cfg.get("version") == "1":
+        cfg["version"] = "1.12"
+    return cfg
 
 
 def make_default_event(name: str) -> dict:
@@ -909,7 +915,7 @@ if check_password():
 
                 if st.button("🔄 GF-Playlisten laden", key="btn_load_pls"):
                     _key = gf_cfg.get("api_key", "")
-                    _ver = gf_cfg.get("version", "1")
+                    _ver = gf_cfg.get("version", "1.12")
                     if not _key:
                         st.warning("Bitte zuerst API-Key eingeben und Verbindung testen.")
                     else:
@@ -938,7 +944,7 @@ if check_password():
 
                     if st.button("🚀 Playlist übertragen", type="primary"):
                         _key = gf_cfg.get("api_key", "")
-                        _ver = gf_cfg.get("version", "1")
+                        _ver = gf_cfg.get("version", "1.12")
                         if not _key:
                             st.warning("Bitte zuerst API-Key eingeben und Verbindung testen.")
                         else:
