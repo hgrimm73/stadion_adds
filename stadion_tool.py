@@ -355,6 +355,44 @@ def gf_test_connection(server: str, api_key: str, version: str) -> dict:
     resp.raise_for_status()
     return resp.json()
 
+def gf_discover_versions(server: str, api_key: str) -> list:
+    """
+    Fragt den Server nach unterstützten API-Versionen.
+    Probiert verschiedene Discovery-Endpunkte.
+    """
+    hdrs  = _gf_headers(api_key)
+    base  = server.rstrip("/")
+    found = []
+
+    # Endpunkt 1: /gv2/webservices/API/Versions (ohne vX.Y)
+    for url in [
+        f"{base}/gv2/webservices/API/Versions",
+        f"{base}/gv2/webservices/API/versions",
+        f"{base}/gv2/webservices/API/swagger/docs/v1",
+        f"{base}/gv2/webservices/API",
+    ]:
+        try:
+            resp = requests.get(url, headers=hdrs, timeout=10)
+            if resp.status_code == 200:
+                found.append({"url": url, "status": 200, "body": resp.text[:500]})
+        except Exception as e:
+            found.append({"url": url, "status": f"Err: {e}"})
+
+    # Endpunkt 2: Systematisch kurze Versionsnummern auf /Playlists testen
+    probe_versions = [str(v/10) for v in range(8, 20)] +                      [f"1.{i}" for i in range(0, 20)] +                      ["1","2","3"]
+    for ver in probe_versions:
+        try:
+            url  = f"{base}/gv2/webservices/API/v{ver}/Playlists"
+            resp = requests.get(url, headers=hdrs, timeout=5)
+            if resp.status_code == 200:
+                found.append({"url": url, "status": 200, "body": resp.text[:200]})
+                break  # Gefunden!
+            elif resp.status_code != 400:
+                found.append({"url": url, "status": resp.status_code})
+        except Exception:
+            pass
+    return found
+
 def gf_get_folder_spots(server: str, api_key: str, version: str, folder_id: str) -> list:
     """
     Versucht mehrere Endpunkte in dieser Reihenfolge:
@@ -768,7 +806,33 @@ if check_password():
             gf_cfg["api_key"] = gf_api_key
             gf_cfg["version"] = gf_version
 
-            if st.button("🔗 Verbindung testen"):
+            col_test, col_disc = st.columns(2)
+            if col_disc.button("🔎 API-Versionen entdecken"):
+                if not gf_api_key:
+                    st.error("Bitte API-Key eingeben.")
+                else:
+                    with st.spinner("Suche verfügbare API-Versionen …"):
+                        results = gf_discover_versions(gf_url, gf_api_key)
+                    st.session_state["gf_discovery"] = results
+
+            if "gf_discovery" in st.session_state:
+                disc = st.session_state["gf_discovery"]
+                success = [r for r in disc if r["status"] == 200]
+                if success:
+                    st.success(f"✅ Funktionierende Endpunkte gefunden!")
+                    for r in success:
+                        st.code(r["url"])
+                        st.caption(r.get("body","")[:300])
+                else:
+                    st.warning("Noch keine 200-Antwort gefunden – alle Ergebnisse:")
+                with st.expander("Alle Discovery-Ergebnisse"):
+                    for r in disc:
+                        icon = "✅" if r["status"] == 200 else "❌"
+                        st.caption(f"{icon} `{r['status']}` → {r['url']}")
+                        if r.get("body"):
+                            st.code(r["body"][:300], language="json")
+
+            if col_test.button("🔗 Verbindung testen"):
                 if not all([gf_url, gf_api_key]):
                     st.error("Bitte Server-URL und API-Key ausfüllen.")
                 else:
