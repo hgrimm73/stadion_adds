@@ -132,18 +132,22 @@ def generate_playlist(event: dict, play_mode: str):
         return None, None, "Keine Sponsoren-Spots vorhanden."
 
     # ── Minimale Loop-Länge berechnen ──────────────────────────────────
+    event_max_s = cfg["total_event_min"] * 60  # harte Obergrenze = Event-Dauer
+
     def min_loop_for_spot(row):
         pct = internal_pct.get(row["Typ"], 0)
-        return (row["Dauer"] / (pct / 100)) if pct > 0 else 999_999
+        return (row["Dauer"] / (pct / 100)) if pct > 0 else event_max_s
 
     sponsoren_df["Min_Loop_Req"] = sponsoren_df.apply(min_loop_for_spot, axis=1)
-    base_loop     = sponsoren_df["Min_Loop_Req"].max()
+    base_loop   = sponsoren_df["Min_Loop_Req"].max()
 
-    min_v_time    = vereins_df["Dauer"].sum() if not vereins_df.empty else 0
-    s_pct_sum     = sum(internal_pct.get(t, 0) for t in sponsoren_df["Typ"])
-    v_pct_avail   = max(1.0, 100.0 - s_pct_sum)
-    loop_for_v    = (min_v_time / (v_pct_avail / 100)) if (v_pct_avail > 0 and min_v_time > 0) else base_loop
-    loop_duration = max(base_loop, loop_for_v)
+    min_v_time  = vereins_df["Dauer"].sum() if not vereins_df.empty else 0
+    s_pct_sum   = sum(internal_pct.get(t, 0) for t in sponsoren_df["Typ"])
+    v_pct_avail = max(0.01, 100.0 - s_pct_sum)
+    loop_for_v  = (min_v_time / (v_pct_avail / 100)) if min_v_time > 0 else base_loop
+
+    # Deckeln auf Event-Dauer
+    loop_duration = min(max(base_loop, loop_for_v), event_max_s)
 
     # ── Sponsoren-Pool ─────────────────────────────────────────────────
     s_pool = []
@@ -157,20 +161,26 @@ def generate_playlist(event: dict, play_mode: str):
                 "Typ":   row["Typ"]
             })
 
-    # ── Vereins-Pool (mit Schutz vor Endlosschleife) ───────────────────
+    # ── Vereins-Pool ───────────────────────────────────────────────────
+    # Ziel: jeder Vereins-Spot mind. 1x, insgesamt genug um die Restzeit zu füllen.
     v_list      = vereins_df.to_dict("records") if not vereins_df.empty else []
     v_instances = []
     if v_list:
         s_total_time = sum(s["Dauer"] for s in s_pool)
-        v_counter    = 0
-        for _ in range(MAX_V_ITER):
-            v_total = sum(v["Dauer"] for v in v_instances)
-            if (s_total_time + v_total) >= loop_duration and v_counter >= len(v_list):
-                break
-            entry = dict(v_list[v_counter % len(v_list)])
-            entry["id"] = str(entry["id"])
-            v_instances.append(entry)
-            v_counter += 1
+        remaining_s  = max(0.0, loop_duration - s_total_time)
+        total_v_dur  = sum(v["Dauer"] for v in v_list)
+
+        # Wie viele vollständige Runden werden gebraucht?
+        if total_v_dur > 0 and remaining_s > 0:
+            full_rounds = max(1, math.ceil(remaining_s / total_v_dur))
+        else:
+            full_rounds = 1
+
+        for _ in range(min(full_rounds, 500)):
+            for v in v_list:
+                entry = dict(v)
+                entry["id"] = str(entry["id"])
+                v_instances.append(entry)
 
     # ── Anordnung ──────────────────────────────────────────────────────
     pkg_order = {"XL": 1, "L": 2, "M": 3, "S": 4}
@@ -324,6 +334,20 @@ def _gf_headers(api_key: str) -> dict:
 def _gf_base(server: str, version: str) -> str:
     return f"{server.rstrip('/')}/gv2/webservices/API/v{version}"
 
+def _read_gf_duration(item: dict) -> int:
+    """Liest Dauer aus einem Grassfish-Item, egal welcher Feldname oder Einheit."""
+    for key in ["Duration","duration","Length","length","TotalDuration",
+                "totalDuration","DurationInSeconds","PlayTime","Playtime","PlayDuration"]:
+        val = item.get(key)
+        if val is not None:
+            try:
+                f = float(val)
+                # Millisekunden-Erkennung: >3600 bei üblichen Clips → ms
+                return max(1, int(f / 1000) if f > 3600 else int(f))
+            except (TypeError, ValueError):
+                continue
+    return 30  # Fallback
+
 def gf_test_connection(server: str, api_key: str, version: str) -> dict:
     """Testet die Verbindung durch Abruf der Server-Version/Lizenz."""
     url  = f"{_gf_base(server, version)}/Licenses"
@@ -403,12 +427,28 @@ def gf_get_spotgroups(server: str, api_key: str, version: str) -> list:
     data = resp.json()
     return data if isinstance(data, list) else data.get("Items", data.get("items", []))
 
-def gf_get_playlists(server: str, api_key: str, version: str) -> list:
-    url  = f"{_gf_base(server, version)}/Playlists"
-    resp = requests.get(url, headers=_gf_headers(api_key), timeout=15)
-    resp.raise_for_status()
-    data = resp.json()
-    return data if isinstance(data, list) else data.get("Items", data.get("items", []))
+def gf_get_playlists(server: str, api_key: str, version: str) -> tuple:
+    """
+    Versucht Playlists mit mehreren API-Versionen zu laden.
+    Gibt (liste, verwendete_version) zurück.
+    """
+    # Versionen in Reihenfolge probieren: zuerst die konfigurierte, dann Alternativen
+    versions_to_try = [version] + [v for v in ["1", "1.12", "1.1", "2", "1.0"] if v != version]
+    last_err = None
+    for ver in versions_to_try:
+        try:
+            url  = f"{_gf_base(server, ver)}/Playlists"
+            resp = requests.get(url, headers=_gf_headers(api_key), timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            items = data if isinstance(data, list) else data.get("Items", data.get("items", []))
+            return items, ver
+        except requests.HTTPError as e:
+            last_err = e
+            if e.response.status_code not in (400, 404):
+                raise  # anderer Fehler → sofort werfen
+            continue
+    raise last_err
 
 def gf_clear_playlist(server: str, api_key: str, version: str, pl_id) -> None:
     url  = f"{_gf_base(server, version)}/Playlists/{pl_id}/Spots"
@@ -832,7 +872,7 @@ if check_password():
 
                 preview = [
                     {"Name":  str(s.get("Name",     s.get("name",     "?"))),
-                     "Dauer": str(s.get("Duration", s.get("duration", "?"))),
+                     "Dauer": f"{_read_gf_duration(s)} s",
                      "ID":    str(s.get("Id",       s.get("id",       "?")))}
                     for s in spots[:15]
                 ]
@@ -868,7 +908,7 @@ if check_password():
                     for c_i, item in enumerate(contents):
                         iid   = str(item.get("Id",       item.get("id",       "")))
                         iname = str(item.get("Name",     item.get("name",     "?")))
-                        idur  = int(item.get("Duration", item.get("duration", 30)))
+                        idur  = _read_gf_duration(item)
                         cn, ct = st.columns([3, 2])
                         cn.caption(f"**{iname[:28]}**\n{idur} s | ID {iid}")
                         cls_val = ct.selectbox(
@@ -921,9 +961,12 @@ if check_password():
                     else:
                         try:
                             with st.spinner("Lade Playlisten..."):
-                                pls = gf_get_playlists(gf_url, _key, _ver)
+                                pls, used_ver = gf_get_playlists(gf_url, _key, _ver)
                                 st.session_state["gf_playlists"] = pls
-                            st.success(f"{len(pls)} Playlisten geladen.")
+                                st.session_state["gf_pl_version"] = used_ver
+                            if used_ver != _ver:
+                                st.info(f"ℹ️ Playlists gefunden mit API-Version **{used_ver}** (statt {_ver}). Bitte Version in den Verbindungseinstellungen auf **{used_ver}** ändern.")
+                            st.success(f"✅ {len(pls)} Playlisten geladen (v{used_ver}).")
                         except requests.HTTPError as e:
                             st.error(f"HTTP-Fehler {e.response.status_code}: {e.response.text[:200]}")
                         except Exception as e:
@@ -944,7 +987,8 @@ if check_password():
 
                     if st.button("🚀 Playlist übertragen", type="primary"):
                         _key = gf_cfg.get("api_key", "")
-                        _ver = gf_cfg.get("version", "1.12")
+                        # Verwende die Version, mit der Playlists erfolgreich geladen wurden
+                        _ver = st.session_state.get("gf_pl_version", gf_cfg.get("version", "1.12"))
                         if not _key:
                             st.warning("Bitte zuerst API-Key eingeben und Verbindung testen.")
                         else:
