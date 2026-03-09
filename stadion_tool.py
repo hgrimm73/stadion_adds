@@ -378,17 +378,36 @@ def gf_discover_versions(server: str, api_key: str) -> list:
         except Exception as e:
             found.append({"url": url, "status": f"Err: {e}"})
 
-    # Endpunkt 2: Systematisch kurze Versionsnummern auf /Playlists testen
-    probe_versions = [str(v/10) for v in range(8, 20)] +                      [f"1.{i}" for i in range(0, 20)] +                      ["1","2","3"]
-    for ver in probe_versions:
+    # Endpunkt 2: 400-Body von v1.12/Playlists lesen (enthält oft erlaubte Version)
+    diag_url = f"{base}/gv2/webservices/API/v1.12/Playlists"
+    try:
+        resp = requests.get(diag_url, headers=hdrs, timeout=10)
+        found.append({"url": diag_url, "status": resp.status_code, "body": resp.text[:800]})
+    except Exception as e:
+        found.append({"url": diag_url, "status": f"Err:{e}", "body": ""})
+
+    # Endpunkt 3: Swagger-Spec laden
+    for swagger_url in [
+        f"{base}/gv2/webservices/API/swagger/docs/v1",
+        f"{base}/gv2/webservices/API/Help",
+    ]:
+        try:
+            resp = requests.get(swagger_url, headers=hdrs, timeout=10)
+            if resp.status_code == 200:
+                found.append({"url": swagger_url, "status": 200, "body": resp.text[:1000]})
+        except Exception:
+            pass
+
+    # Endpunkt 4: v1.3 bis v1.19 auf Playlists testen
+    for minor in range(3, 20):
+        ver = f"1.{minor}"
         try:
             url  = f"{base}/gv2/webservices/API/v{ver}/Playlists"
             resp = requests.get(url, headers=hdrs, timeout=5)
+            found.append({"url": url, "status": resp.status_code,
+                           "body": resp.text[:300] if resp.status_code != 400 else ""})
             if resp.status_code == 200:
-                found.append({"url": url, "status": 200, "body": resp.text[:200]})
-                break  # Gefunden!
-            elif resp.status_code != 400:
-                found.append({"url": url, "status": resp.status_code})
+                break
         except Exception:
             pass
     return found
@@ -1022,6 +1041,25 @@ if check_password():
                 res_push = st.session_state[f"pl_{push_ev_i}"]
                 st.caption(f"Bereit: {len(res_push)} Spots")
 
+                # ── Workaround: Manuelle Playlist-ID ─────────────────────
+                with st.expander("🔧 Playlist-ID manuell eingeben"):
+                    st.caption(
+                        "Falls das automatische Laden fehlschlägt: Öffne den Grassfish Manager, "
+                        "navigiere zur Playlist und kopiere die ID aus der URL oder den Einstellungen."
+                    )
+                    c_mid, c_mname = st.columns(2)
+                    manual_pl_id   = c_mid.text_input("Playlist-ID", placeholder="z.B. 123", key="manual_pl_id")
+                    manual_pl_name = c_mname.text_input("Name", placeholder="z.B. Stadion Loop", key="manual_pl_name")
+                    if st.button("Übernehmen", key="btn_manual_pl"):
+                        if manual_pl_id.strip():
+                            mname = manual_pl_name.strip() or f"Playlist {manual_pl_id}"
+                            st.session_state["gf_playlists"]  = [{"Id": manual_pl_id.strip(), "Name": mname}]
+                            st.session_state["gf_pl_version"] = gf_cfg.get("version", "1.12")
+                            st.success(f"Playlist gesetzt: {mname} (ID {manual_pl_id})")
+                            st.rerun()
+                        else:
+                            st.warning("Bitte Playlist-ID eingeben.")
+                st.divider()
                 if st.button("🔄 GF-Playlisten laden", key="btn_load_pls"):
                     _key = gf_cfg.get("api_key", "")
                     _ver = gf_cfg.get("version", "1.12")
