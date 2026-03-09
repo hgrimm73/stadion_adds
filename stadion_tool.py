@@ -490,7 +490,7 @@ def gf_get_playlists(server: str, api_key: str, version: str) -> tuple:
     Gibt (liste, beschreibung, probe_log) zurück.
     probe_log = [(url, status_code_oder_fehler), ...]
     """
-    versions_to_try   = [version] + [v for v in ["1.12","1","1.1","1.2","2","1.0"] if v != version]
+    versions_to_try   = [version] + [v for v in ["1.19","1.18","1.17","1.16","1.15","1.12","1"] if v != version]
     endpoints_to_try  = ["Playlists","playlists","PlaylistGroups","Playlist","ChannelPlaylists"]
     probe_log = []
 
@@ -513,21 +513,23 @@ def gf_get_playlists(server: str, api_key: str, version: str) -> tuple:
     raise RuntimeError(f"__PROBE_LOG__{repr(probe_log)}__END__Kein funktionierender Playlists-Endpunkt gefunden.")
 
 def gf_clear_playlist(server: str, api_key: str, version: str, pl_id) -> None:
-    url  = f"{_gf_base(server, version)}/Playlists/{pl_id}/Spots"
-    resp = requests.delete(url, headers=_gf_headers(api_key), timeout=15)
+    for ver in [version] + [v for v in ["1.19","1.18","1.12"] if v != version]:
+        url  = f"{_gf_base(server, ver)}/Playlists/{pl_id}/Spots"
+        resp = requests.delete(url, headers=_gf_headers(api_key), timeout=15)
+        if resp.status_code in (200, 204): return
+        if resp.status_code != 400: resp.raise_for_status()
     resp.raise_for_status()
 
 def gf_push_playlist(server: str, api_key: str, version: str, pl_id, spot_ids: list) -> dict:
-    url  = f"{_gf_base(server, version)}/Playlists/{pl_id}/Spots"
     body = [{"SpotId": int(s), "Position": i + 1} for i, s in enumerate(spot_ids)]
-    resp = requests.put(url, json=body, headers=_gf_headers(api_key), timeout=30)
+    for ver in [version] + [v for v in ["1.19","1.18","1.12"] if v != version]:
+        url  = f"{_gf_base(server, ver)}/Playlists/{pl_id}/Spots"
+        resp = requests.put(url, json=body, headers=_gf_headers(api_key), timeout=30)
+        if resp.status_code in (200, 201, 204): return resp.json() if resp.content else {}
+        if resp.status_code != 400: resp.raise_for_status()
     resp.raise_for_status()
-    return resp.json() if resp.content else {}
+    return {}
 
-
-# ─────────────────────────────────────────────
-#  PAKET-BELEGUNG SIDEBAR
-# ─────────────────────────────────────────────
 def render_sidebar_usage(event: dict):
     cfg          = event["config"]
     spots        = event["spots"]
@@ -833,6 +835,15 @@ if check_password():
                     with st.spinner("Suche verfügbare API-Versionen …"):
                         results = gf_discover_versions(gf_url, gf_api_key)
                     st.session_state["gf_discovery"] = results
+                    # Playlist-Version automatisch erkennen und speichern
+                    import re as _re
+                    for _r in results:
+                        if _r.get("status") == 200 and "/Playlists" in _r.get("url",""):
+                            _m = _re.search(r"/v([\d.]+)/Playlists", _r["url"])
+                            if _m:
+                                gf_cfg["version_playlists"] = _m.group(1)
+                                st.success(f"✅ Playlist-Version erkannt: **v{_m.group(1)}** – automatisch gespeichert!")
+                                break
 
             if "gf_discovery" in st.session_state:
                 disc = st.session_state["gf_discovery"]
@@ -1062,7 +1073,7 @@ if check_password():
                 st.divider()
                 if st.button("🔄 GF-Playlisten laden", key="btn_load_pls"):
                     _key = gf_cfg.get("api_key", "")
-                    _ver = gf_cfg.get("version", "1.12")
+                    _ver = gf_cfg.get("version_playlists", gf_cfg.get("version", "1.19"))
                     if not _key:
                         st.warning("Bitte zuerst API-Key eingeben und Verbindung testen.")
                     else:
