@@ -334,19 +334,64 @@ def _gf_headers(api_key: str) -> dict:
 def _gf_base(server: str, version: str) -> str:
     return f"{server.rstrip('/')}/gv2/webservices/API/v{version}"
 
-def _read_gf_duration(item: dict) -> int:
-    """Liest Dauer aus einem Grassfish-Item, egal welcher Feldname oder Einheit."""
-    for key in ["Duration","duration","Length","length","TotalDuration",
-                "totalDuration","DurationInSeconds","PlayTime","Playtime","PlayDuration"]:
-        val = item.get(key)
-        if val is not None:
+# Bekannte Feldnamen für Dauer – wird automatisch erweitert wenn neuer Name entdeckt wird
+_DURATION_KEYS = [
+    "Duration", "duration", "Length", "length",
+    "TotalDuration", "totalDuration", "DurationInSeconds", "durationInSeconds",
+    "PlayTime", "Playtime", "playtime", "PlayDuration", "playDuration",
+    "FileDuration", "fileDuration", "ContentDuration", "SpotDuration",
+    "RuntimeSeconds", "RuntimeMs", "DurationMs", "DurationSec",
+]
+
+def _detect_duration_key(item: dict) -> str | None:
+    """
+    Findet automatisch den richtigen Feldnamen für die Dauer.
+    Gibt den Schlüsselnamen zurück oder None wenn nicht gefunden.
+    """
+    # 1) Bekannte Namen prüfen
+    for key in _DURATION_KEYS:
+        if key in item:
+            return key
+    # 2) Heuristik: alle Keys die "dur", "time", "length", "runtime" enthalten
+    # und einen numerischen Wert > 0 haben
+    candidates = []
+    for key, val in item.items():
+        key_lower = key.lower()
+        if any(hint in key_lower for hint in ["dur","length","time","runtime","second","playtime"]):
             try:
                 f = float(val)
-                # Millisekunden-Erkennung: >3600 bei üblichen Clips → ms
-                return max(1, int(f / 1000) if f > 3600 else int(f))
+                if 0 < f < 100_000:  # plausible Sekunden- oder ms-Range
+                    candidates.append((key, f))
             except (TypeError, ValueError):
-                continue
-    return 30  # Fallback
+                pass
+    if candidates:
+        # Bevorzuge den mit dem kleinsten plausiblen Wert (Sekunden > ms)
+        candidates.sort(key=lambda x: abs(x[1] - 30))  # am nächsten an 30s
+        return candidates[0][0]
+    return None
+
+def _read_gf_duration(item: dict, override_key: str = None) -> int:
+    """Liest Dauer aus einem Grassfish-Item."""
+    key = override_key or _detect_duration_key(item)
+    if key and item.get(key) is not None:
+        try:
+            f = float(item[key])
+            # Millisekunden-Erkennung: >3600 → wahrscheinlich ms
+            return max(1, int(f / 1000) if f > 3600 else int(f))
+        except (TypeError, ValueError):
+            pass
+    return 30  # Fallback – sollte nicht mehr vorkommen
+
+def _get_numeric_fields(item: dict) -> dict:
+    """Gibt alle Felder mit numerischen Werten zurück – für Debug-Anzeige."""
+    result = {}
+    for key, val in item.items():
+        try:
+            f = float(val)
+            result[key] = f
+        except (TypeError, ValueError):
+            pass
+    return result
 
 def gf_test_connection(server: str, api_key: str, version: str) -> dict:
     """Testet die Verbindung durch Abruf der Server-Version/Lizenz."""
@@ -1123,7 +1168,7 @@ if check_password():
 
                 preview = [
                     {"Name":  str(s.get("Name",     s.get("name",     "?"))),
-                     "Dauer": f"{_read_gf_duration(s)} s",
+                     "Dauer": f"{_read_gf_duration(s, gf_cfg.get('dur_field_override') or None)} s",
                      "ID":    str(s.get("Id",       s.get("id",       "?")))}
                     for s in spots[:15]
                 ]
@@ -1131,15 +1176,44 @@ if check_password():
                              hide_index=True, height=220)
 
                 # Debug-Panel
-                with st.expander("🔍 Debug: Rohstruktur eines Spots (alle Felder)"):
+                with st.expander("🔍 Debug: Rohstruktur & Feld-Erkennung"):
                     sample = st.session_state.get("gf_raw_sample", spots[:1])
                     if sample:
-                        st.json(sample[0])
-                        st.caption(
-                            "👆 Hier siehst du alle Felder eines Spots. Prüfe, "
-                            "welches Feld die Ordner-ID enthält (z.B. SpotGroupId, "
-                            "SuperSpotGroupId, CustomerId …)"
-                        )
+                        first = sample[0]
+                        # Automatisch erkanntes Dauer-Feld anzeigen
+                        dur_key = _detect_duration_key(first)
+                        if dur_key:
+                            raw_val = first.get(dur_key)
+                            dur_sec = _read_gf_duration(first)
+                            st.success(f"✅ Erkanntes Dauer-Feld: **`{dur_key}`** = {raw_val} → **{dur_sec} s**")
+                        else:
+                            st.error("❌ Kein Dauer-Feld erkannt! Bitte unten numerische Felder prüfen.")
+
+                        # Alle numerischen Felder anzeigen
+                        num_fields = _get_numeric_fields(first)
+                        if num_fields:
+                            st.caption("**Alle numerischen Felder dieses Spots:**")
+                            rows = [{"Feldname": k, "Wert": v,
+                                     "Als Sekunden": int(v/1000) if v > 3600 else int(v)}
+                                    for k, v in num_fields.items()]
+                            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+                        # Override-Möglichkeit
+                        st.caption("---")
+                        st.caption("**Manueller Override** (falls die Erkennung falsch ist):")
+                        override = st.text_input("Feldname für Dauer erzwingen",
+                                                  value=gf_cfg.get("dur_field_override",""),
+                                                  placeholder=f"z.B. {dur_key or 'Duration'}",
+                                                  key="dur_override_input")
+                        if st.button("Override speichern", key="btn_dur_override"):
+                            gf_cfg["dur_field_override"] = override.strip()
+                            save_data()
+                            st.success(f"Gespeichert: Dauer-Feld = '{override.strip() or 'auto'}'")
+                            st.rerun()
+
+                        st.caption("---")
+                        st.caption("**Vollständige Rohstruktur:**")
+                        st.json(first)
 
         # ── SCHRITT 2: Klassifizieren & übernehmen ─────────────────────
         with step2:
@@ -1159,7 +1233,7 @@ if check_password():
                     for c_i, item in enumerate(contents):
                         iid   = str(item.get("Id",       item.get("id",       "")))
                         iname = str(item.get("Name",     item.get("name",     "?")))
-                        idur  = _read_gf_duration(item)
+                        idur  = _read_gf_duration(item, gf_cfg.get("dur_field_override") or None)
                         cn, ct = st.columns([3, 2])
                         cn.caption(f"**{iname[:28]}**\n{idur} s | ID {iid}")
                         cls_val = ct.selectbox(
