@@ -577,50 +577,94 @@ def gf_clear_playlist(server: str, api_key: str, version: str, pl_id, version_id
             log.append((url, str(e)))
     return False, None, log
 
-def gf_push_playlist(server: str, api_key: str, version: str, pl_id, spot_ids: list, version_id=None) -> tuple:
+def gf_fetch_swagger_endpoints(server: str, api_key: str, version: str) -> list:
+    """Lädt die Swagger-Spec und extrahiert alle verfügbaren Endpunkte."""
+    hdrs = _gf_headers(api_key)
+    base = server.rstrip("/")
+    endpoints = []
+    for url in [
+        f"{base}/gv2/webservices/API/swagger/docs/v{version}",
+        f"{base}/gv2/webservices/API/swagger/docs/v1",
+        f"{base}/gv2/webservices/API/Help/index",
+    ]:
+        try:
+            resp = requests.get(url, headers=hdrs, timeout=15)
+            if resp.status_code == 200:
+                try:
+                    spec = resp.json()
+                    paths = spec.get("paths", {})
+                    for path in paths:
+                        if "playlist" in path.lower():
+                            for method in paths[path]:
+                                endpoints.append(f"{method.upper()} {path}")
+                    return endpoints
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    return []
+
+def gf_push_playlist(server: str, api_key: str, version: str, pl_id, spot_ids: list, version_id=None, playlist_obj=None) -> tuple:
     """
     Überträgt Spots in die Playlist.
-    Probiert verschiedene URL-Pfade und Body-Formate.
-    Gibt (success, url_used, log) zurück.
+    Strategie 1: Sub-Ressource /Spots (verschiedene Pfade & Bodies)
+    Strategie 2: PUT /Playlists/{id} mit vollständigem Playlist-Objekt
+    Strategie 3: PUT /PlaylistVersions/{vid} mit Spots im Body
     """
-    log   = []
-    hdrs  = _gf_headers(api_key)
+    log  = []
+    hdrs = _gf_headers(api_key)
+    vers = [version] + [v for v in ["1.19","1.18","1.12","1"] if v != version]
 
-    # Verschiedene Body-Formate die Grassfish kennt
-    def make_bodies(ids):
-        return [
-            [{"SpotId": int(s), "Position": i+1} for i, s in enumerate(ids)],
-            [{"Id": int(s), "SortOrder": i+1} for i, s in enumerate(ids)],
-            [{"ContentId": int(s), "Position": i+1} for i, s in enumerate(ids)],
-            [int(s) for s in ids],
-        ]
+    spot_bodies = [
+        [{"SpotId": int(s), "Position": i+1} for i, s in enumerate(spot_ids)],
+        [{"Id":     int(s), "SortOrder":  i+1} for i, s in enumerate(spot_ids)],
+        [{"ContentId": int(s), "Position": i+1} for i, s in enumerate(spot_ids)],
+        [int(s) for s in spot_ids],
+    ]
 
+    # ── Strategie 1: Sub-Ressource ─────────────────────────────────────
     for url in _gf_playlist_spot_urls(server, version, pl_id, version_id):
-        for body in make_bodies(spot_ids):
-            try:
-                resp = requests.put(url, json=body, headers=hdrs, timeout=30)
-                log.append((url, resp.status_code, str(body)[:60]))
-                if resp.status_code in (200, 201, 204):
-                    return True, url, log
-                if resp.status_code == 404:
-                    break  # falsche URL, nächste versuchen
-            except Exception as e:
-                log.append((url, str(e), ""))
-                break
-
-    # POST als Alternative zu PUT probieren
-    for url in _gf_playlist_spot_urls(server, version, pl_id):
-        for body in make_bodies(spot_ids):
-            try:
-                resp = requests.post(url, json=body, headers=hdrs, timeout=30)
-                log.append((f"POST {url}", resp.status_code, str(body)[:60]))
-                if resp.status_code in (200, 201, 204):
-                    return True, f"POST {url}", log
-                if resp.status_code == 404:
+        for body in spot_bodies:
+            for method in [requests.put, requests.post]:
+                try:
+                    resp = method(url, json=body, headers=hdrs, timeout=30)
+                    log.append((f"{'PUT' if method==requests.put else 'POST'} {url}",
+                                resp.status_code, str(body)[:60]))
+                    if resp.status_code in (200, 201, 204):
+                        return True, url, log
+                    if resp.status_code == 404:
+                        break
+                except Exception as e:
+                    log.append((url, str(e), ""))
                     break
-            except Exception as e:
-                log.append((url, str(e), ""))
-                break
+            else:
+                continue
+            break  # 404 → nächste URL
+
+    # ── Strategie 2: PUT /Playlists/{id} mit vollständigem Objekt ──────
+    spots_in_obj = [{"SpotId": int(s), "Position": i+1} for i, s in enumerate(spot_ids)]
+    for ver in vers:
+        for pid in ([pl_id] + ([version_id] if version_id and version_id != pl_id else [])):
+            for url, body in [
+                # Playlist-Objekt mit Spots drin
+                (f"{_gf_base(server, ver)}/Playlists/{pid}",
+                 {"Id": int(pl_id), "Spots": spots_in_obj}),
+                # PlaylistVersion mit Spots
+                (f"{_gf_base(server, ver)}/PlaylistVersions/{pid}",
+                 {"Id": int(pid), "Spots": spots_in_obj, "PlaylistSpots": spots_in_obj}),
+                # Nur Spots-Array direkt an die Playlist
+                (f"{_gf_base(server, ver)}/Playlists/{pid}",
+                 {"PlaylistSpots": spots_in_obj}),
+            ]:
+                for method in [requests.put, requests.patch]:
+                    try:
+                        resp = method(url, json=body, headers=hdrs, timeout=30)
+                        label = "PUT" if method == requests.put else "PATCH"
+                        log.append((f"{label} {url}", resp.status_code, str(body)[:80]))
+                        if resp.status_code in (200, 201, 204):
+                            return True, f"{label} {url}", log
+                    except Exception as e:
+                        log.append((url, str(e), ""))
 
     return False, None, log
 
@@ -921,7 +965,21 @@ if check_password():
             gf_cfg["api_key"] = gf_api_key
             gf_cfg["version"] = gf_version
 
-            col_test, col_disc = st.columns(2)
+            col_test, col_disc, col_swagger = st.columns(3)
+            if col_swagger.button("📋 Playlist-Endpunkte aus Swagger"):
+                if not gf_api_key:
+                    st.error("Bitte API-Key eingeben.")
+                else:
+                    _ver_s = gf_cfg.get("version_playlists", gf_cfg.get("version","1.19"))
+                    with st.spinner("Lade Swagger-Spec …"):
+                        eps = gf_fetch_swagger_endpoints(gf_url, gf_api_key, _ver_s)
+                    if eps:
+                        st.success(f"✅ {len(eps)} Playlist-Endpunkte gefunden:")
+                        for ep in eps:
+                            st.code(ep)
+                    else:
+                        st.warning("Keine Playlist-Endpunkte in Swagger-Spec gefunden.")
+
             if col_disc.button("🔎 API-Versionen entdecken"):
                 if not gf_api_key:
                     st.error("Bitte API-Key eingeben.")
