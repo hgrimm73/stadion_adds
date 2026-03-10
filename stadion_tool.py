@@ -512,20 +512,27 @@ def gf_get_playlists(server: str, api_key: str, version: str) -> tuple:
     # Probe-Log in einer globalen Variable für die UI zugänglich machen
     raise RuntimeError(f"__PROBE_LOG__{repr(probe_log)}__END__Kein funktionierender Playlists-Endpunkt gefunden.")
 
-def _gf_playlist_spot_urls(server: str, version: str, pl_id) -> list:
-    """Alle bekannten URL-Varianten für Playlist-Spot-Operationen."""
+def _gf_playlist_spot_urls(server: str, version: str, pl_id, version_id=None) -> list:
+    """
+    Alle bekannten URL-Varianten für Playlist-Spot-Operationen.
+    version_id = ActiveVersion.Id aus der Playlist-Antwort (oft anders als pl_id!)
+    """
     vers = [version] + [v for v in ["1.19","1.18","1.12","1"] if v != version]
-    paths = [
-        f"Playlists/{pl_id}/Spots",
-        f"Playlists/{pl_id}/PlaylistSpots",
-        f"Playlists/{pl_id}/Contents",
-        f"Playlists/{pl_id}/Items",
-        f"PlaylistVersions/{pl_id}/Spots",
-    ]
+    ids_to_try = [pl_id]
+    if version_id and str(version_id) != str(pl_id):
+        ids_to_try.append(version_id)
+
     combos = []
     for ver in vers:
-        for path in paths:
-            combos.append(f"{_gf_base(server, ver)}/{path}")
+        for pid in ids_to_try:
+            for path in [
+                f"Playlists/{pid}/Spots",
+                f"Playlists/{pid}/PlaylistSpots",
+                f"Playlists/{pid}/Contents",
+                f"PlaylistVersions/{pid}/Spots",
+                f"PlaylistVersions/{pid}/PlaylistSpots",
+            ]:
+                combos.append(f"{_gf_base(server, ver)}/{path}")
     return combos
 
 def gf_probe_push_url(server: str, api_key: str, version: str, pl_id) -> str:
@@ -555,10 +562,10 @@ def gf_probe_push_url(server: str, api_key: str, version: str, pl_id) -> str:
             pass
     return None
 
-def gf_clear_playlist(server: str, api_key: str, version: str, pl_id) -> tuple:
+def gf_clear_playlist(server: str, api_key: str, version: str, pl_id, version_id=None) -> tuple:
     """Leert die Playlist. Gibt (success, url_used, log) zurück."""
     log = []
-    for url in _gf_playlist_spot_urls(server, version, pl_id):
+    for url in _gf_playlist_spot_urls(server, version, pl_id, version_id):
         try:
             resp = requests.delete(url, headers=_gf_headers(api_key), timeout=15)
             log.append((url, resp.status_code))
@@ -570,7 +577,7 @@ def gf_clear_playlist(server: str, api_key: str, version: str, pl_id) -> tuple:
             log.append((url, str(e)))
     return False, None, log
 
-def gf_push_playlist(server: str, api_key: str, version: str, pl_id, spot_ids: list) -> tuple:
+def gf_push_playlist(server: str, api_key: str, version: str, pl_id, spot_ids: list, version_id=None) -> tuple:
     """
     Überträgt Spots in die Playlist.
     Probiert verschiedene URL-Pfade und Body-Formate.
@@ -582,17 +589,13 @@ def gf_push_playlist(server: str, api_key: str, version: str, pl_id, spot_ids: l
     # Verschiedene Body-Formate die Grassfish kennt
     def make_bodies(ids):
         return [
-            # Format 1: SpotId + Position
             [{"SpotId": int(s), "Position": i+1} for i, s in enumerate(ids)],
-            # Format 2: Id + SortOrder
             [{"Id": int(s), "SortOrder": i+1} for i, s in enumerate(ids)],
-            # Format 3: ContentId
             [{"ContentId": int(s), "Position": i+1} for i, s in enumerate(ids)],
-            # Format 4: nur IDs als Array
             [int(s) for s in ids],
         ]
 
-    for url in _gf_playlist_spot_urls(server, version, pl_id):
+    for url in _gf_playlist_spot_urls(server, version, pl_id, version_id):
         for body in make_bodies(spot_ids):
             try:
                 resp = requests.put(url, json=body, headers=hdrs, timeout=30)
@@ -1174,6 +1177,14 @@ if check_password():
                                 st.session_state["gf_playlists"]  = pls
                                 st.session_state["gf_pl_version"] = used_desc.split("/")[0].lstrip("v")
                                 st.session_state["gf_pl_probe"]   = probe_log
+                                # ActiveVersion-IDs für jede Playlist speichern
+                                ver_map = {}
+                                for p in pls:
+                                    pid = str(p.get("Id", p.get("id","")))
+                                    av  = p.get("ActiveVersion", p.get("activeVersion", {}))
+                                    vid = av.get("Id", av.get("id","")) if isinstance(av, dict) else ""
+                                    ver_map[pid] = str(vid) if vid else pid
+                                st.session_state["gf_pl_ver_map"] = ver_map
                             st.success(f"✅ {len(pls)} Playlisten geladen via `{used_desc}`")
                         except RuntimeError as e:
                             msg = str(e)
@@ -1200,11 +1211,14 @@ if check_password():
 
                 if "gf_playlists" in st.session_state:
                     pls = st.session_state["gf_playlists"]
-                    pl_map = {
-                        f"{p.get('Name', p.get('name','?'))}  (ID {p.get('Id', p.get('id','?'))})":
-                        p.get("Id", p.get("id"))
-                        for p in pls
-                    }
+                    pl_map = {}
+                    for p in pls:
+                        pid  = p.get("Id",   p.get("id",   "?"))
+                        name = p.get("Name", p.get("name", "?"))
+                        av   = p.get("ActiveVersion", p.get("activeVersion", {}))
+                        vid  = av.get("Id", av.get("id","")) if isinstance(av, dict) else ""
+                        label = f"{name}  (Playlist-ID {pid}, Version-ID {vid})" if vid else f"{name}  (ID {pid})"
+                        pl_map[label] = pid
                     sel_pl_name = st.selectbox("Ziel-Playlist in Grassfish", list(pl_map.keys()))
                     sel_pl_id   = pl_map[sel_pl_name]
 
@@ -1220,13 +1234,15 @@ if check_password():
                             spot_ids = res_push["id"].tolist()
                             push_log = []
                             try:
+                                ver_map   = st.session_state.get("gf_pl_ver_map", {})
+                                version_id = ver_map.get(str(sel_pl_id), sel_pl_id)
                                 with st.spinner("Übertrage …"):
                                     if clear_opt:
-                                        ok_c, url_c, log_c = gf_clear_playlist(gf_url, _key, _ver, sel_pl_id)
+                                        ok_c, url_c, log_c = gf_clear_playlist(gf_url, _key, _ver, sel_pl_id, version_id)
                                         push_log += [(f"DELETE {u}", s, "") for u, s in log_c]
                                         if not ok_c:
                                             st.warning("⚠️ Playlist konnte nicht geleert werden – fahre trotzdem fort.")
-                                    ok_p, url_p, log_p = gf_push_playlist(gf_url, _key, _ver, sel_pl_id, spot_ids)
+                                    ok_p, url_p, log_p = gf_push_playlist(gf_url, _key, _ver, sel_pl_id, spot_ids, version_id)
                                     push_log += log_p
                                 if ok_p:
                                     st.success(f"✅ {len(spot_ids)} Spots übertragen via `{url_p}`")
