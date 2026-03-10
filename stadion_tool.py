@@ -343,54 +343,94 @@ _DURATION_KEYS = [
     "RuntimeSeconds", "RuntimeMs", "DurationMs", "DurationSec",
 ]
 
+def _extract_val(item: dict, dotted_key: str):
+    """Liest einen Wert aus einem Dict, auch verschachtelt (z.B. 'ActiveVersion.Duration')."""
+    parts = dotted_key.split(".")
+    cur = item
+    for part in parts:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(part)
+    return cur
+
 def _detect_duration_key(item: dict) -> str | None:
     """
     Findet automatisch den richtigen Feldnamen für die Dauer.
-    Gibt den Schlüsselnamen zurück oder None wenn nicht gefunden.
+    Sucht auch in verschachtelten Objekten (z.B. ActiveVersion.Duration).
+    Gibt gepunkteten Pfad zurück (z.B. 'ActiveVersion.Duration').
     """
-    # 1) Bekannte Namen prüfen
+    # 1) Bekannte Top-Level-Namen
     for key in _DURATION_KEYS:
-        if key in item:
-            return key
-    # 2) Heuristik: alle Keys die "dur", "time", "length", "runtime" enthalten
-    # und einen numerischen Wert > 0 haben
-    candidates = []
-    for key, val in item.items():
-        key_lower = key.lower()
-        if any(hint in key_lower for hint in ["dur","length","time","runtime","second","playtime"]):
+        if key in item and item[key] is not None:
             try:
-                f = float(val)
-                if 0 < f < 100_000:  # plausible Sekunden- oder ms-Range
-                    candidates.append((key, f))
+                float(item[key])
+                return key
             except (TypeError, ValueError):
                 pass
-    if candidates:
-        # Bevorzuge den mit dem kleinsten plausiblen Wert (Sekunden > ms)
-        candidates.sort(key=lambda x: abs(x[1] - 30))  # am nächsten an 30s
-        return candidates[0][0]
+
+    # 2) Verschachtelte Suche in dict-Werten (eine Ebene tief)
+    for parent_key, parent_val in item.items():
+        if isinstance(parent_val, dict):
+            for key in _DURATION_KEYS:
+                if key in parent_val and parent_val[key] is not None:
+                    try:
+                        float(parent_val[key])
+                        return f"{parent_key}.{key}"
+                    except (TypeError, ValueError):
+                        pass
+            # Heuristik in verschachtelten Dicts
+            for key, val in parent_val.items():
+                if any(h in key.lower() for h in ["dur","length","runtime"]):
+                    try:
+                        f = float(val)
+                        if 0 < f < 100_000:
+                            return f"{parent_key}.{key}"
+                    except (TypeError, ValueError):
+                        pass
+
+    # 3) Heuristik Top-Level
+    for key, val in item.items():
+        if any(h in key.lower() for h in ["dur","length","runtime","playtime"]):
+            try:
+                f = float(val)
+                if 0 < f < 100_000:
+                    return key
+            except (TypeError, ValueError):
+                pass
     return None
 
 def _read_gf_duration(item: dict, override_key: str = None) -> int:
-    """Liest Dauer aus einem Grassfish-Item."""
+    """Liest Dauer aus einem Grassfish-Item, auch aus verschachtelten Feldern."""
     key = override_key or _detect_duration_key(item)
-    if key and item.get(key) is not None:
-        try:
-            f = float(item[key])
-            # Millisekunden-Erkennung: >3600 → wahrscheinlich ms
-            return max(1, int(f / 1000) if f > 3600 else int(f))
-        except (TypeError, ValueError):
-            pass
-    return 30  # Fallback – sollte nicht mehr vorkommen
+    if key:
+        val = _extract_val(item, key)
+        if val is not None:
+            try:
+                f = float(val)
+                return max(1, int(f / 1000) if f > 3600 else int(f))
+            except (TypeError, ValueError):
+                pass
+    return 30
 
-def _get_numeric_fields(item: dict) -> dict:
-    """Gibt alle Felder mit numerischen Werten zurück – für Debug-Anzeige."""
-    result = {}
+def _get_numeric_fields(item: dict) -> list:
+    """Gibt alle Felder mit numerischen Werten zurück – auch verschachtelt."""
+    result = []
     for key, val in item.items():
-        try:
-            f = float(val)
-            result[key] = f
-        except (TypeError, ValueError):
-            pass
+        if isinstance(val, dict):
+            for sub_key, sub_val in val.items():
+                try:
+                    f = float(sub_val)
+                    result.append({"Feldname": f"{key}.{sub_key}", "Wert": f,
+                                   "Als Sekunden": int(f/1000) if f > 3600 else int(f)})
+                except (TypeError, ValueError):
+                    pass
+        else:
+            try:
+                f = float(val)
+                result.append({"Feldname": key, "Wert": f,
+                               "Als Sekunden": int(f/1000) if f > 3600 else int(f)})
+            except (TypeError, ValueError):
+                pass
     return result
 
 def gf_test_connection(server: str, api_key: str, version: str) -> dict:
@@ -1193,10 +1233,7 @@ if check_password():
                         num_fields = _get_numeric_fields(first)
                         if num_fields:
                             st.caption("**Alle numerischen Felder dieses Spots:**")
-                            rows = [{"Feldname": k, "Wert": v,
-                                     "Als Sekunden": int(v/1000) if v > 3600 else int(v)}
-                                    for k, v in num_fields.items()]
-                            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                            st.dataframe(pd.DataFrame(num_fields), use_container_width=True, hide_index=True)
 
                         # Override-Möglichkeit
                         st.caption("---")
