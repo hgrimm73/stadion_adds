@@ -512,23 +512,114 @@ def gf_get_playlists(server: str, api_key: str, version: str) -> tuple:
     # Probe-Log in einer globalen Variable für die UI zugänglich machen
     raise RuntimeError(f"__PROBE_LOG__{repr(probe_log)}__END__Kein funktionierender Playlists-Endpunkt gefunden.")
 
-def gf_clear_playlist(server: str, api_key: str, version: str, pl_id) -> None:
-    for ver in [version] + [v for v in ["1.19","1.18","1.12"] if v != version]:
-        url  = f"{_gf_base(server, ver)}/Playlists/{pl_id}/Spots"
-        resp = requests.delete(url, headers=_gf_headers(api_key), timeout=15)
-        if resp.status_code in (200, 204): return
-        if resp.status_code != 400: resp.raise_for_status()
-    resp.raise_for_status()
+def _gf_playlist_spot_urls(server: str, version: str, pl_id) -> list:
+    """Alle bekannten URL-Varianten für Playlist-Spot-Operationen."""
+    vers = [version] + [v for v in ["1.19","1.18","1.12","1"] if v != version]
+    paths = [
+        f"Playlists/{pl_id}/Spots",
+        f"Playlists/{pl_id}/PlaylistSpots",
+        f"Playlists/{pl_id}/Contents",
+        f"Playlists/{pl_id}/Items",
+        f"PlaylistVersions/{pl_id}/Spots",
+    ]
+    combos = []
+    for ver in vers:
+        for path in paths:
+            combos.append(f"{_gf_base(server, ver)}/{path}")
+    return combos
 
-def gf_push_playlist(server: str, api_key: str, version: str, pl_id, spot_ids: list) -> dict:
-    body = [{"SpotId": int(s), "Position": i + 1} for i, s in enumerate(spot_ids)]
-    for ver in [version] + [v for v in ["1.19","1.18","1.12"] if v != version]:
-        url  = f"{_gf_base(server, ver)}/Playlists/{pl_id}/Spots"
-        resp = requests.put(url, json=body, headers=_gf_headers(api_key), timeout=30)
-        if resp.status_code in (200, 201, 204): return resp.json() if resp.content else {}
-        if resp.status_code != 400: resp.raise_for_status()
-    resp.raise_for_status()
-    return {}
+def gf_probe_push_url(server: str, api_key: str, version: str, pl_id) -> str:
+    """
+    Findet den funktionierenden PUT-Endpunkt für Playlist-Spots.
+    Sendet einen Probe-PUT mit leerem Body und schaut welche URL nicht 404 zurückgibt.
+    """
+    hdrs = _gf_headers(api_key)
+    for url in _gf_playlist_spot_urls(server, version, pl_id):
+        try:
+            # OPTIONS oder HEAD zum Prüfen ob URL existiert
+            resp = requests.head(url, headers=hdrs, timeout=5)
+            if resp.status_code not in (404, 405):
+                return url
+            # 405 = Method Not Allowed aber URL existiert → auch gut
+            if resp.status_code == 405:
+                return url
+        except Exception:
+            pass
+    # Fallback: GET probieren
+    for url in _gf_playlist_spot_urls(server, version, pl_id):
+        try:
+            resp = requests.get(url, headers=hdrs, timeout=5)
+            if resp.status_code != 404:
+                return url
+        except Exception:
+            pass
+    return None
+
+def gf_clear_playlist(server: str, api_key: str, version: str, pl_id) -> tuple:
+    """Leert die Playlist. Gibt (success, url_used, log) zurück."""
+    log = []
+    for url in _gf_playlist_spot_urls(server, version, pl_id):
+        try:
+            resp = requests.delete(url, headers=_gf_headers(api_key), timeout=15)
+            log.append((url, resp.status_code))
+            if resp.status_code in (200, 204):
+                return True, url, log
+            if resp.status_code == 404:
+                continue  # falscher Pfad
+        except Exception as e:
+            log.append((url, str(e)))
+    return False, None, log
+
+def gf_push_playlist(server: str, api_key: str, version: str, pl_id, spot_ids: list) -> tuple:
+    """
+    Überträgt Spots in die Playlist.
+    Probiert verschiedene URL-Pfade und Body-Formate.
+    Gibt (success, url_used, log) zurück.
+    """
+    log   = []
+    hdrs  = _gf_headers(api_key)
+
+    # Verschiedene Body-Formate die Grassfish kennt
+    def make_bodies(ids):
+        return [
+            # Format 1: SpotId + Position
+            [{"SpotId": int(s), "Position": i+1} for i, s in enumerate(ids)],
+            # Format 2: Id + SortOrder
+            [{"Id": int(s), "SortOrder": i+1} for i, s in enumerate(ids)],
+            # Format 3: ContentId
+            [{"ContentId": int(s), "Position": i+1} for i, s in enumerate(ids)],
+            # Format 4: nur IDs als Array
+            [int(s) for s in ids],
+        ]
+
+    for url in _gf_playlist_spot_urls(server, version, pl_id):
+        for body in make_bodies(spot_ids):
+            try:
+                resp = requests.put(url, json=body, headers=hdrs, timeout=30)
+                log.append((url, resp.status_code, str(body)[:60]))
+                if resp.status_code in (200, 201, 204):
+                    return True, url, log
+                if resp.status_code == 404:
+                    break  # falsche URL, nächste versuchen
+            except Exception as e:
+                log.append((url, str(e), ""))
+                break
+
+    # POST als Alternative zu PUT probieren
+    for url in _gf_playlist_spot_urls(server, version, pl_id):
+        for body in make_bodies(spot_ids):
+            try:
+                resp = requests.post(url, json=body, headers=hdrs, timeout=30)
+                log.append((f"POST {url}", resp.status_code, str(body)[:60]))
+                if resp.status_code in (200, 201, 204):
+                    return True, f"POST {url}", log
+                if resp.status_code == 404:
+                    break
+            except Exception as e:
+                log.append((url, str(e), ""))
+                break
+
+    return False, None, log
 
 def render_sidebar_usage(event: dict):
     cfg          = event["config"]
@@ -1122,23 +1213,36 @@ if check_password():
 
                     if st.button("🚀 Playlist übertragen", type="primary"):
                         _key = gf_cfg.get("api_key", "")
-                        # Verwende die Version, mit der Playlists erfolgreich geladen wurden
-                        _ver = st.session_state.get("gf_pl_version", gf_cfg.get("version", "1.12"))
+                        _ver = st.session_state.get("gf_pl_version", gf_cfg.get("version", "1.19"))
                         if not _key:
                             st.warning("Bitte zuerst API-Key eingeben und Verbindung testen.")
                         else:
+                            spot_ids = res_push["id"].tolist()
+                            push_log = []
                             try:
-                                spot_ids = res_push["id"].tolist()
                                 with st.spinner("Übertrage …"):
                                     if clear_opt:
-                                        gf_clear_playlist(gf_url, _key, _ver, sel_pl_id)
-                                    gf_push_playlist(gf_url, _key, _ver, sel_pl_id, spot_ids)
-                                st.success(f"✅ {len(spot_ids)} Spots erfolgreich in Grassfish übertragen!")
-                                st.balloons()
-                            except requests.HTTPError as e:
-                                st.error(
-                                    f"HTTP-Fehler beim Push: {e.response.status_code}\n"
-                                    f"{e.response.text[:300]}"
-                                )
+                                        ok_c, url_c, log_c = gf_clear_playlist(gf_url, _key, _ver, sel_pl_id)
+                                        push_log += [(f"DELETE {u}", s, "") for u, s in log_c]
+                                        if not ok_c:
+                                            st.warning("⚠️ Playlist konnte nicht geleert werden – fahre trotzdem fort.")
+                                    ok_p, url_p, log_p = gf_push_playlist(gf_url, _key, _ver, sel_pl_id, spot_ids)
+                                    push_log += log_p
+                                if ok_p:
+                                    st.success(f"✅ {len(spot_ids)} Spots übertragen via `{url_p}`")
+                                    st.balloons()
+                                else:
+                                    st.error("❌ Kein funktionierender Push-Endpunkt gefunden.")
+                                    with st.expander("🔍 Debug: Push-Versuche", expanded=True):
+                                        for entry in push_log:
+                                            url_e = entry[0]; status_e = entry[1]
+                                            body_e = entry[2] if len(entry) > 2 else ""
+                                            icon = "✅" if str(status_e) in ("200","201","204") else "❌"
+                                            st.caption(f"{icon} `{status_e}` → {url_e}")
+                                            if body_e:
+                                                st.caption(f"   Body: `{body_e}`")
                             except Exception as e:
-                                st.error(f"Fehler beim Push: {e}")
+                                st.error(f"Fehler: {e}")
+                                with st.expander("🔍 Debug"):
+                                    for entry in push_log:
+                                        st.caption(str(entry))
