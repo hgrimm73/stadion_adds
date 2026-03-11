@@ -254,34 +254,68 @@ def generate_playlist(event: dict, play_mode: str):
     # ── Anordnung: Sponsor-Gruppen gleichmäßig verteilen ─────────────
     pkg_order = {"XL": 1, "L": 2, "M": 3, "S": 4}
 
-    def interleave_by_sponsor(pool):
-        """Verteilt Spots gleichmäßig: gleiche Sponsoren möglichst weit auseinander."""
-        from collections import defaultdict, deque
-        groups = defaultdict(deque)
-        for s in pool:
-            groups[s["Sponsor"]].append(s)
+    def distribute_evenly(s_pool, v_instances, loop_duration):
+        """
+        Verteilt Sponsor-Spots gleichmäßig über die gesamte Loop-Zeitachse.
+        Jeder Sponsor bekommt N Slots, die gleichmäßig über den Loop verteilt sind.
+        Verein-Spots füllen die Lücken zwischen den Sponsor-Slots.
+
+        Idee:
+        - Berechne für jeden Sponsor den "Abstand" zwischen seinen Auftritten
+          (loop_duration / anzahl_auftritte).
+        - Weise jedem Sponsor-Spot einen Ziel-Zeitpunkt zu.
+        - Sortiere alle Sponsor-Spots nach Ziel-Zeitpunkt.
+        - Baue die finale Liste auf: Sponsor-Spot → fülle Lücke mit Verein-Spots.
+        """
+        from collections import deque
+
+        # Ziel-Zeitpunkte pro Sponsor berechnen
+        # Jeder Sponsor-Spot bekommt einen gleichmäßig verteilten Slot
+        sponsor_groups = {}
+        for spot in s_pool:
+            key = spot["Sponsor"]
+            sponsor_groups.setdefault(key, []).append(spot)
+
+        timed_spots = []  # (ziel_zeitpunkt, spot)
+        for sponsor, spots_of_sponsor in sponsor_groups.items():
+            n = len(spots_of_sponsor)
+            interval = loop_duration / n
+            # Erster Auftritt leicht versetzt je nach Sponsor (verhindert Überlappung)
+            offset = list(sponsor_groups.keys()).index(sponsor) * (interval / max(len(sponsor_groups), 1))
+            offset = offset % interval
+            for i, spot in enumerate(spots_of_sponsor):
+                target_t = offset + i * interval
+                timed_spots.append((target_t, sponsor, spot))
+
+        # Nach Ziel-Zeitpunkt sortieren; bei Gleichstand nach Sponsor-Name
+        timed_spots.sort(key=lambda x: (x[0], x[1]))
+
+        # Verein-Pool als Deque für einfaches Entnehmen
+        v_queue = deque(v_instances)
+        total_v = len(v_instances)
+        # Wie viele Verein-Spots zwischen je zwei Sponsor-Spots?
+        n_sponsor = len(timed_spots)
+        v_per_gap = total_v / max(n_sponsor, 1)  # float, wird gerundet
+
         result = []
-        while any(groups.values()):
-            for key in list(groups.keys()):
-                if groups[key]:
-                    result.append(groups[key].popleft())
-                else:
-                    del groups[key]
+        v_budget = 0.0
+        for _, _, spot in timed_spots:
+            result.append(spot)
+            v_budget += v_per_gap
+            # Ganze Verein-Spots aus dem Budget entnehmen
+            while v_budget >= 1.0 and v_queue:
+                result.append(v_queue.popleft())
+                v_budget -= 1.0
+
+        # Verbleibende Verein-Spots anhängen
+        while v_queue:
+            result.append(v_queue.popleft())
+
         return result
 
     final_playlist = []
     if play_mode == "Durchmischt":
-        # Sponsor-Gruppen gleichmäßig verteilen, Verein dazwischen
-        s_interleaved = interleave_by_sponsor(s_pool)
-        v_idx = 0
-        for s in s_interleaved:
-            final_playlist.append(s)
-            if v_idx < len(v_instances):
-                final_playlist.append(v_instances[v_idx])
-                v_idx += 1
-        while v_idx < len(v_instances):
-            final_playlist.append(v_instances[v_idx])
-            v_idx += 1
+        final_playlist = distribute_evenly(s_pool, v_instances, loop_duration)
     elif "zuerst" in play_mode:
         s_pool.sort(key=lambda x: pkg_order.get(x["Typ"], 5))
         final_playlist = s_pool + v_instances
