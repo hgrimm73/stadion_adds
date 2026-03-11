@@ -75,6 +75,14 @@ def _write_to_disk():
 
 
 def load_data():
+    # Alte Playlist-Keys aus Session löschen vor dem Laden
+    keys_to_del = [k for k in st.session_state if k.startswith("pl_")]
+    for k in keys_to_del:
+        del st.session_state[k]
+    st.session_state.pop("gf_cls", None)
+    st.session_state.pop("gf_folder_contents", None)
+    st.session_state.pop("gf_playlists", None)
+
     if os.path.exists(STORAGE_FILE):
         try:
             with open(STORAGE_FILE, "r", encoding="utf-8") as f:
@@ -84,8 +92,7 @@ def load_data():
             # Gespeicherte Playlisten wiederherstellen
             for i, pl_data in enumerate(data.get("playlists", [])):
                 if pl_data:
-                    import pandas as _pd
-                    st.session_state[f"pl_{i}"]     = _pd.DataFrame(pl_data["df"])
+                    st.session_state[f"pl_{i}"]     = pd.DataFrame(pl_data["df"])
                     st.session_state[f"pl_dur_{i}"] = pl_data["dur"]
             st.session_state["_unsaved"] = False
         except json.JSONDecodeError as e:
@@ -904,6 +911,8 @@ if check_password():
         load_data()
     if "grassfish_config" not in st.session_state:
         st.session_state.grassfish_config = {}
+    if "_unsaved" not in st.session_state:
+        st.session_state["_unsaved"] = False
 
     st.set_page_config(page_title="Stadion Ad-Manager", layout="wide", page_icon="🏟️")
     st.title("🏟️ Stadion Ad-Manager")
@@ -924,12 +933,36 @@ if check_password():
         )
         st.sidebar.header("⚙️ Event-Verwaltung")
 
-        # Ungespeichert-Anzeige
-        if st.session_state.get("_unsaved"):
+        # Ungespeichert-Anzeige + Speichern/Laden
+        unsaved = st.session_state.get("_unsaved", False)
+        if unsaved:
             st.sidebar.warning("⚠️ Ungespeicherte Änderungen")
-        if st.sidebar.button("💾 Alle Daten speichern", type="primary"):
+
+        c_save, c_load = st.sidebar.columns(2)
+        if c_save.button("💾 Speichern", type="primary", use_container_width=True,
+                         help="Alle Daten, Events, Konfiguration und Playlisten speichern"):
             _write_to_disk()
-            st.sidebar.success("✅ Gespeichert!")
+            st.rerun()
+
+        if c_load.button("📂 Laden", type="secondary", use_container_width=True,
+                         help="Zuletzt gespeicherten Stand vollständig laden"):
+            if st.session_state.get("_unsaved"):
+                st.session_state["_confirm_load"] = True
+            else:
+                load_data()
+                st.rerun()
+
+        # Bestätigung falls ungespeicherte Änderungen vorhanden
+        if st.session_state.get("_confirm_load"):
+            st.sidebar.error("⚠️ Ungespeicherte Änderungen gehen verloren!")
+            cc1, cc2 = st.sidebar.columns(2)
+            if cc1.button("Ja, laden", key="btn_confirm_load"):
+                st.session_state.pop("_confirm_load", None)
+                load_data()
+                st.rerun()
+            if cc2.button("Abbrechen", key="btn_cancel_load"):
+                st.session_state.pop("_confirm_load", None)
+                st.rerun()
 
         if st.sidebar.button("🚪 Abmelden"):
             st.session_state.authenticated = False
@@ -1466,7 +1499,8 @@ if check_password():
                             })
                             added += 1
                         save_data()
-                        st.success(f"✅ {added} Spots hinzugefügt, {dupes} Duplikate übersprungen.")
+                        st.session_state.pop("gf_cls", None)  # Formular zurücksetzen
+                        st.rerun()
 
         # ── SCHRITT 3: Playlist pushen ─────────────────────────────────
         with step3:
