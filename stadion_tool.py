@@ -44,13 +44,34 @@ def check_password():
 # ─────────────────────────────────────────────
 #  DATENPERSISTENZ
 # ─────────────────────────────────────────────
-def save_data():
+def save_data(force: bool = False):
+    """
+    force=True  → sofort auf Disk schreiben (nur beim expliziten Speichern-Button).
+    force=False → nur als "ungespeichert" markieren (Standard für alle UI-Aktionen).
+    """
+    st.session_state["_unsaved"] = True
+    if force:
+        _write_to_disk()
+
+def _write_to_disk():
+    # Generierte Playlisten serialisieren
+    playlists = []
+    for i in range(len(st.session_state.get("events", []))):
+        df  = st.session_state.get(f"pl_{i}")
+        dur = st.session_state.get(f"pl_dur_{i}")
+        if df is not None and dur is not None:
+            playlists.append({"df": df.to_dict(orient="records"), "dur": dur})
+        else:
+            playlists.append(None)
+
     data = {
-        "events": st.session_state.events,
-        "grassfish_config": st.session_state.get("grassfish_config", {})
+        "events":           st.session_state.events,
+        "grassfish_config": st.session_state.get("grassfish_config", {}),
+        "playlists":        playlists,
     }
     with open(STORAGE_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
+    st.session_state["_unsaved"] = False
 
 
 def load_data():
@@ -58,8 +79,15 @@ def load_data():
         try:
             with open(STORAGE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            st.session_state.events          = data.get("events", [])
+            st.session_state.events           = data.get("events", [])
             st.session_state.grassfish_config = _migrate_grassfish_config(data.get("grassfish_config", {}))
+            # Gespeicherte Playlisten wiederherstellen
+            for i, pl_data in enumerate(data.get("playlists", [])):
+                if pl_data:
+                    import pandas as _pd
+                    st.session_state[f"pl_{i}"]     = _pd.DataFrame(pl_data["df"])
+                    st.session_state[f"pl_dur_{i}"] = pl_data["dur"]
+            st.session_state["_unsaved"] = False
         except json.JSONDecodeError as e:
             st.warning(f"JSON-Fehler beim Laden: {e}. Starte mit leeren Daten.")
             _reset_session()
@@ -896,9 +924,12 @@ if check_password():
         )
         st.sidebar.header("⚙️ Event-Verwaltung")
 
-        if st.sidebar.button("💾 Alle Daten speichern"):
-            save_data()
-            st.sidebar.success("Gespeichert!")
+        # Ungespeichert-Anzeige
+        if st.session_state.get("_unsaved"):
+            st.sidebar.warning("⚠️ Ungespeicherte Änderungen")
+        if st.sidebar.button("💾 Alle Daten speichern", type="primary"):
+            _write_to_disk()
+            st.sidebar.success("✅ Gespeichert!")
 
         if st.sidebar.button("🚪 Abmelden"):
             st.session_state.authenticated = False
