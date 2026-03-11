@@ -650,16 +650,23 @@ def gf_probe_push_url(server: str, api_key: str, version: str, pl_id) -> str:
 def gf_clear_playlist(server: str, api_key: str, version: str, pl_id, version_id=None) -> tuple:
     """Leert die Playlist. Gibt (success, url_used, log) zurück."""
     log = []
-    for url in _gf_playlist_spot_urls(server, version, pl_id, version_id):
-        try:
-            resp = requests.delete(url, headers=_gf_headers(api_key), timeout=15)
-            log.append((url, resp.status_code))
-            if resp.status_code in (200, 204):
-                return True, url, log
-            if resp.status_code == 404:
-                continue  # falscher Pfad
-        except Exception as e:
-            log.append((url, str(e)))
+    vid  = version_id if version_id else pl_id
+    vers = [version] + [v for v in ["1.19","1.18","1.12","1"] if v != version]
+
+    # Primär: DELETE /PlaylistVersions/{vid}/Items
+    for ver in vers:
+        for pid in list(dict.fromkeys([vid, pl_id])):
+            for path in [f"PlaylistVersions/{pid}/Items",
+                         f"Playlists/{pid}/Spots",
+                         f"Playlists/{pid}/Items"]:
+                url = f"{_gf_base(server, ver)}/{path}"
+                try:
+                    resp = requests.delete(url, headers=_gf_headers(api_key), timeout=15)
+                    log.append((f"DELETE {url}", resp.status_code))
+                    if resp.status_code in (200, 204):
+                        return True, url, log
+                except Exception as e:
+                    log.append((f"DELETE {url}", str(e)))
     return False, None, log
 
 def gf_fetch_swagger_endpoints(server: str, api_key: str, version: str) -> list:
@@ -692,64 +699,85 @@ def gf_fetch_swagger_endpoints(server: str, api_key: str, version: str) -> list:
 def gf_push_playlist(server: str, api_key: str, version: str, pl_id, spot_ids: list, version_id=None, playlist_obj=None) -> tuple:
     """
     Überträgt Spots in die Playlist.
-    Strategie 1: Sub-Ressource /Spots (verschiedene Pfade & Bodies)
-    Strategie 2: PUT /Playlists/{id} mit vollständigem Playlist-Objekt
-    Strategie 3: PUT /PlaylistVersions/{vid} mit Spots im Body
+    Primär: POST /v1.19/PlaylistVersions/{versionId}/Items  (ein Item pro Request)
+    Fallback: diverse ältere Pfad-/Body-Varianten
     """
     log  = []
     hdrs = _gf_headers(api_key)
     vers = [version] + [v for v in ["1.19","1.18","1.12","1"] if v != version]
+    vid  = version_id if version_id else pl_id  # ActiveVersion.Id bevorzugen
 
-    spot_bodies = [
+    # ── Primär-Strategie: POST /PlaylistVersions/{vid}/Items einzeln ───
+    # Korrekte Body-Struktur laut Grassfish API-Doku:
+    # SpotId + SequenceNumber (Position) + DurationSeconds
+    def make_item(spot_id, position, duration_s=None):
+        body = {
+            "SpotId":         int(spot_id),
+            "SequenceNumber": position,
+        }
+        if duration_s:
+            body["DurationSeconds"] = int(duration_s)
+        return body
+
+    for ver in vers:
+        url = f"{_gf_base(server, ver)}/PlaylistVersions/{vid}/Items"
+        # Teste mit erstem Spot
+        test_body = make_item(spot_ids[0], 1)
+        try:
+            resp = requests.post(url, json=test_body, headers=hdrs, timeout=15)
+            log.append((f"POST {url}", resp.status_code, str(test_body)))
+        except Exception as e:
+            log.append((f"POST {url}", str(e), str(test_body)))
+            continue
+
+        if resp.status_code == 404:
+            continue  # falsche Version → nächste versuchen
+
+        if resp.status_code in (200, 201, 204):
+            # Restliche Spots übertragen
+            failed = 0
+            for i, spot_id in enumerate(spot_ids[1:], start=2):
+                body = make_item(spot_id, i)
+                try:
+                    r = requests.post(url, json=body, headers=hdrs, timeout=15)
+                    log.append((f"POST {url}", r.status_code, str(body)))
+                    if r.status_code not in (200, 201, 204):
+                        failed += 1
+                except Exception as e:
+                    log.append((f"POST {url}", str(e), str(body)))
+                    failed += 1
+            result_url = f"POST {url} ({len(spot_ids)-failed}/{len(spot_ids)} OK)"
+            return failed == 0, result_url, log
+
+        # Anderer Fehler (z.B. 400/422) → Body-Problem, nicht URL-Problem → loggen & weiter
+        log.append((f"POST {url}", resp.status_code, f"Response: {resp.text[:200]}"))
+
+    # ── Fallback: Array-basierte Endpunkte ──────────────────────────────
+    array_bodies = [
         [{"SpotId": int(s), "Position": i+1} for i, s in enumerate(spot_ids)],
         [{"Id":     int(s), "SortOrder":  i+1} for i, s in enumerate(spot_ids)],
         [{"ContentId": int(s), "Position": i+1} for i, s in enumerate(spot_ids)],
-        [int(s) for s in spot_ids],
     ]
-
-    # ── Strategie 1: Sub-Ressource ─────────────────────────────────────
-    for url in _gf_playlist_spot_urls(server, version, pl_id, version_id):
-        for body in spot_bodies:
-            for method in [requests.put, requests.post]:
-                try:
-                    resp = method(url, json=body, headers=hdrs, timeout=30)
-                    log.append((f"{'PUT' if method==requests.put else 'POST'} {url}",
-                                resp.status_code, str(body)[:60]))
-                    if resp.status_code in (200, 201, 204):
-                        return True, url, log
-                    if resp.status_code == 404:
-                        break
-                except Exception as e:
-                    log.append((url, str(e), ""))
-                    break
-            else:
-                continue
-            break  # 404 → nächste URL
-
-    # ── Strategie 2: PUT /Playlists/{id} mit vollständigem Objekt ──────
-    spots_in_obj = [{"SpotId": int(s), "Position": i+1} for i, s in enumerate(spot_ids)]
     for ver in vers:
-        for pid in ([pl_id] + ([version_id] if version_id and version_id != pl_id else [])):
-            for url, body in [
-                # Playlist-Objekt mit Spots drin
-                (f"{_gf_base(server, ver)}/Playlists/{pid}",
-                 {"Id": int(pl_id), "Spots": spots_in_obj}),
-                # PlaylistVersion mit Spots
-                (f"{_gf_base(server, ver)}/PlaylistVersions/{pid}",
-                 {"Id": int(pid), "Spots": spots_in_obj, "PlaylistSpots": spots_in_obj}),
-                # Nur Spots-Array direkt an die Playlist
-                (f"{_gf_base(server, ver)}/Playlists/{pid}",
-                 {"PlaylistSpots": spots_in_obj}),
-            ]:
-                for method in [requests.put, requests.patch]:
-                    try:
-                        resp = method(url, json=body, headers=hdrs, timeout=30)
-                        label = "PUT" if method == requests.put else "PATCH"
-                        log.append((f"{label} {url}", resp.status_code, str(body)[:80]))
-                        if resp.status_code in (200, 201, 204):
-                            return True, f"{label} {url}", log
-                    except Exception as e:
-                        log.append((url, str(e), ""))
+        for pid in list(dict.fromkeys([vid, pl_id])):
+            for path in [f"PlaylistVersions/{pid}/Items",
+                         f"Playlists/{pid}/Spots",
+                         f"Playlists/{pid}/Items"]:
+                url = f"{_gf_base(server, ver)}/{path}"
+                for body in array_bodies:
+                    for method in [requests.post, requests.put]:
+                        try:
+                            resp = method(url, json=body, headers=hdrs, timeout=30)
+                            label = "POST" if method == requests.post else "PUT"
+                            log.append((f"{label} {url}", resp.status_code, str(body)[:80]))
+                            if resp.status_code in (200, 201, 204):
+                                return True, f"{label} {url}", log
+                            if resp.status_code == 404:
+                                break
+                        except Exception as e:
+                            log.append((url, str(e), ""))
+                    if log and log[-1][1] == 404:
+                        break
 
     return False, None, log
 
