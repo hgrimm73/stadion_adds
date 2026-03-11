@@ -696,7 +696,7 @@ def gf_fetch_swagger_endpoints(server: str, api_key: str, version: str) -> list:
             pass
     return []
 
-def gf_push_playlist(server: str, api_key: str, version: str, pl_id, spot_ids: list, version_id=None, playlist_obj=None) -> tuple:
+def gf_push_playlist(server: str, api_key: str, version: str, pl_id, spot_ids: list, version_id=None, playlist_obj=None, spot_durations: dict = None) -> tuple:
     """
     Überträgt Spots in die Playlist.
     Primär: POST /v1.19/PlaylistVersions/{versionId}/Items  (ein Item pro Request)
@@ -710,13 +710,13 @@ def gf_push_playlist(server: str, api_key: str, version: str, pl_id, spot_ids: l
     # ── Primär-Strategie: POST /PlaylistVersions/{vid}/Items einzeln ───
     # Korrekte Body-Struktur laut Grassfish API-Doku:
     # SpotId + SequenceNumber (Position) + DurationSeconds
-    def make_item(spot_id, position, duration_s=None):
-        body = {
-            "SpotId":         int(spot_id),
-            "SequenceNumber": position,
+    def make_item(spot_id, position):
+        dur = (spot_durations or {}).get(str(spot_id), 30)
+        return {
+            "SpotId":          int(spot_id),
+            "SequenceNumber":  position,
+            "DurationSeconds": int(dur),
         }
-        if duration_s:
-            body["DurationSeconds"] = int(duration_s)
         return body
 
     for ver in vers:
@@ -1439,7 +1439,12 @@ if check_password():
                                         push_log += [(f"DELETE {u}", s, "") for u, s in log_c]
                                         if not ok_c:
                                             st.warning("⚠️ Playlist konnte nicht geleert werden – fahre trotzdem fort.")
-                                    ok_p, url_p, log_p = gf_push_playlist(gf_url, _key, _ver, sel_pl_id, spot_ids, version_id)
+                                    # Dauer je Spot (id→sekunden) mitgeben
+                                    spot_dur_map = {}
+                                    if "id" in res_push.columns and "Dauer" in res_push.columns:
+                                        for _, row in res_push.iterrows():
+                                            spot_dur_map[str(row["id"])] = int(row["Dauer"])
+                                    ok_p, url_p, log_p = gf_push_playlist(gf_url, _key, _ver, sel_pl_id, spot_ids, version_id, spot_durations=spot_dur_map)
                                     push_log += log_p
                                 if ok_p:
                                     st.success(f"✅ {len(spot_ids)} Spots übertragen via `{url_p}`")
