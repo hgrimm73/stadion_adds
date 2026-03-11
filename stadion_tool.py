@@ -342,30 +342,6 @@ def show_timeline(res_df: pd.DataFrame):
     st.plotly_chart(fig, use_container_width=True)
 
 
-    # Legende manuell
-    for typ, col in TYP_COLORS.items():
-        fig.add_trace(go.Bar(
-            x=[0], y=[typ], orientation="h",
-            marker_color=col, showlegend=True,
-            name=typ, visible="legendonly"
-        ))
-
-    fig.update_layout(
-        title=dict(text="⏱️ Loop-Timeline", font=dict(size=16)),
-        xaxis=dict(title="Zeit (Sekunden)", tickformat="d"),
-        yaxis=dict(title="", categoryorder="array",
-                   categoryarray=["S", "M", "L", "XL", "Verein (Puffer)"]),
-        barmode="stack",
-        height=280,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02),
-        plot_bgcolor="#0e1117",
-        paper_bgcolor="#0e1117",
-        font=dict(color="white"),
-        margin=dict(l=10, r=10, t=50, b=40)
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-
 # ─────────────────────────────────────────────
 #  PDF-EXPORT
 # ─────────────────────────────────────────────
@@ -1047,6 +1023,15 @@ if check_password():
 
             # ── Spot-Liste anzeigen ────────────────────────────────────
             if spots:
+                col_del_all, _ = st.columns([1, 4])
+                if col_del_all.button("🗑️ Alle Spots löschen", key=f"del_all_{ev_idx}",
+                                       type="secondary",
+                                       help="Alle Spots dieses Events löschen"):
+                    event["spots"] = []
+                    st.session_state.pop(f"pl_{ev_idx}", None)
+                    st.session_state.pop(f"pl_dur_{ev_idx}", None)
+                    save_data()
+                    st.rerun()
                 for s_i, spot in enumerate(spots):
                     cn, cd, ct, cs, cb = st.columns([3, 1, 1, 2, 1])
                     cn.text(spot["Name"])
@@ -1078,17 +1063,24 @@ if check_password():
                 res_df, loop_dur, _gen_msg = generate_playlist(event, play_mode)
                 if _gen_msg and not _gen_msg.startswith("⚠️"):
                     st.error(_gen_msg)
-                else:  # no fatal error
+                else:
                     if _gen_msg and _gen_msg.startswith("⚠️"):
                         st.warning(_gen_msg)
-                    st.session_state[f"pl_{ev_idx}"]       = res_df
-                    st.session_state[f"pl_dur_{ev_idx}"]   = loop_dur
+                    st.session_state[f"pl_{ev_idx}"]     = res_df
+                    st.session_state[f"pl_dur_{ev_idx}"] = loop_dur
+                    if loop_dur > 600:  # > 10 Minuten
+                        st.session_state[f"pl_longwarn_{ev_idx}"] = True
+                    else:
+                        st.session_state.pop(f"pl_longwarn_{ev_idx}", None)
 
             # ── Ergebnis anzeigen ──────────────────────────────────────
             if f"pl_{ev_idx}" in st.session_state:
                 res_df   = st.session_state[f"pl_{ev_idx}"]
                 loop_dur = st.session_state[f"pl_dur_{ev_idx}"]
                 total_s  = res_df["Dauer"].sum()
+
+                if st.session_state.get(f"pl_longwarn_{ev_idx}"):
+                    st.warning(f"⚠️ Achtung! Die Playliste ist bereits länger als 10 Minuten! (Loop-Dauer: {int(loop_dur//60)} m {int(loop_dur%60)} s)")
 
                 c1, c2, c3 = st.columns(3)
                 c1.success(f"⏱ Loop-Dauer: **{int(loop_dur//60)} m {int(loop_dur%60)} s**")
