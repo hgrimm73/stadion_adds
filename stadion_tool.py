@@ -10,6 +10,10 @@ import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 from fpdf import FPDF
 
+# Evisco-Logo (base64-kodiert)
+EVISCO_LOGO_B64 = "/9j/4AAQSkZJRgABAQEAYABgAAD/4QAiRXhpZgAATU0AKgAAAAgAAQESAAMAAAABAAEAAAAAAAD/7AARRHVja3kAAQAEAAAAZAAA/+EDkGh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC8APD94cGFja2V0IGJlZ2luPSLvu78iIGlkPSJXNU0wTXBDZWhpSHpyZVN6TlRjemtjOWQiPz4NCjx4OnhtcG1ldGEgeG1sbnM6eD0iYWRvYmU6bnM6bWV0YS8iIHg6eG1wdGs9IkFkb2JlIFhNUCBDb3JlIDUuNi1jMTM4IDc5LjE1OTgyNCwgMjAxNi8wOS8xNC0wMTowOTowMSAgICAgICAgIj4NCgk8cmRmOlJERiB4bWxuczpyZGY9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkvMDIvMjItcmRmLXN5bnRheC1ucyMiPg0KCQk8cmRmOkRlc2NyaXB0aW9uIHJkZjphYm91dD0iIiB4bWxuczp4bXBNTT0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wL21tLyIgeG1sbnM6c3RSZWY9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9zVHlwZS9SZXNvdXJjZVJlZiMiIHhtbG5zOnhtcD0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wLyIgeG1wTU06T3JpZ2luYWxEb2N1bWVudElEPSJ4bXAuZGlkOmIwOGVmMDUzLTU4OWQtZmQ0MS04MDI0LTZjMWVmY2VlMzFmOCIgeG1wTU06RG9jdW1lbnRJRD0ieG1wLmRpZDo0NDUyQzdCRTZCQzYxMUU3QTQ5RUYwNjM1NjE3RkY5MCIgeG1wTU06SW5zdGFuY2VJRD0ieG1wLmlpZDo0NDUyQzdCRDZCQzYxMUU3QTQ5RUYwNjM1NjE3RkY5MCIgeG1wOkNyZWF0b3JUb29sPSJBZG9iZSBQaG90b3Nob3AgQ0MgMjAxNyAoV2luZG93cykiPg0KCQkJPHhtcE1NOkRlcml2ZWRGcm9tIHN0UmVmOmluc3RhbmNlSUQ9InhtcC5paWQ6YmFmYzM1ZWQtOGI3Yy1iMDQ3LWJiZTEtZTFmOTRhYmQ5ODM0IiBzdFJlZjpkb2N1bWVudElEPSJ4bXAuZGlkOmIwOGVmMDUzLTU4OWQtZmQ0MS04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"
+
+
 # ─────────────────────────────────────────────
 #  KONFIGURATION & SICHERHEIT
 # ─────────────────────────────────────────────
@@ -118,78 +122,124 @@ def compute_internal_pct(cfg: dict) -> dict:
 def generate_playlist(event: dict, play_mode: str):
     """
     Erzeugt eine Loop-Playlist mit minimaler Spotanzahl.
-    Gibt (DataFrame, loop_duration_sek, error_string) zurück.
+    Unterstützt Sponsor-Gruppen (mehrere Files pro Sponsor).
+    Gibt (DataFrame, loop_duration_sek, error_string|warning_string) zurück.
+    Das dritte Element ist None (OK), ein str mit "⚠️" (Warnung) oder ein str ohne (Fehler).
     """
     spots        = event["spots"]
     cfg          = event["config"]
     internal_pct = compute_internal_pct(cfg)
 
     df_all       = pd.DataFrame(spots)
+    # Sponsor-Feld mit Fallback auf Typ (Abwärtskompatibilität)
+    if "Sponsor" not in df_all.columns:
+        df_all["Sponsor"] = df_all["Typ"]
+
     sponsoren_df = df_all[df_all["Typ"] != "Verein (Puffer)"].copy()
     vereins_df   = df_all[df_all["Typ"] == "Verein (Puffer)"].copy()
 
     if sponsoren_df.empty:
         return None, None, "Keine Sponsoren-Spots vorhanden."
 
-    # ── Minimale Loop-Länge berechnen ──────────────────────────────────
-    event_max_s = cfg["total_event_min"] * 60  # harte Obergrenze = Event-Dauer
+    event_max_s = cfg["total_event_min"] * 60
 
-    def min_loop_for_spot(row):
-        pct = internal_pct.get(row["Typ"], 0)
-        return (row["Dauer"] / (pct / 100)) if pct > 0 else event_max_s
+    # ── Gruppen-basierte Loop-Berechnung ──────────────────────────────
+    # Gruppe = eindeutiger (Sponsor, Typ). Alle Files einer Gruppe teilen sich den %-Anteil.
+    # Mindest-Loop: die Gruppe muss so lang sein, dass alle Spots mind. 1x passen.
+    group_min_loops = []
+    for (sponsor, typ), grp in sponsoren_df.groupby(["Sponsor", "Typ"], sort=False):
+        pct = internal_pct.get(typ, 0)
+        if pct <= 0:
+            continue
+        group_total_dur = grp["Dauer"].sum()  # eine Runde durch alle Gruppe-Spots
+        min_loop = group_total_dur / (pct / 100)
+        group_min_loops.append(min_loop)
 
-    sponsoren_df["Min_Loop_Req"] = sponsoren_df.apply(min_loop_for_spot, axis=1)
-    base_loop   = sponsoren_df["Min_Loop_Req"].max()
+    base_loop = max(group_min_loops) if group_min_loops else event_max_s
 
     min_v_time  = vereins_df["Dauer"].sum() if not vereins_df.empty else 0
-    s_pct_sum   = sum(internal_pct.get(t, 0) for t in sponsoren_df["Typ"])
+    s_pct_sum   = sum(internal_pct.get(t, 0) for t in sponsoren_df["Typ"].unique())
     v_pct_avail = max(0.01, 100.0 - s_pct_sum)
     loop_for_v  = (min_v_time / (v_pct_avail / 100)) if min_v_time > 0 else base_loop
 
-    # Deckeln auf Event-Dauer
     loop_duration = min(max(base_loop, loop_for_v), event_max_s)
 
-    # ── Sponsoren-Pool ─────────────────────────────────────────────────
-    s_pool = []
-    for _, row in sponsoren_df.iterrows():
-        wdh = math.ceil((loop_duration * (internal_pct[row["Typ"]] / 100)) / row["Dauer"])
-        for _ in range(wdh):
-            s_pool.append({
-                "id":    str(row["id"]),
-                "Name":  row["Name"],
-                "Dauer": int(row["Dauer"]),
-                "Typ":   row["Typ"]
-            })
+    # ── Warnung wenn Playlist durch Mindest-1x-Bedingung sehr groß wird ──
+    warning_msg = None
+    min_possible_spots = len(sponsoren_df) + (len(vereins_df) if not vereins_df.empty else 0)
+    min_possible_dur   = sponsoren_df["Dauer"].sum() + vereins_df["Dauer"].sum() if not vereins_df.empty else sponsoren_df["Dauer"].sum()
+    if min_possible_dur > loop_duration * 0.8:
+        warning_msg = (
+            f"⚠️ Die Mindestanzahl der Spots ({min_possible_spots}) erfordert "
+            f"bereits {int(min_possible_dur//60)}:{int(min_possible_dur%60):02d} min – "
+            f"die Playlist wird dadurch groß. Trotzdem fortfahren?"
+        )
 
-    # ── Vereins-Pool ───────────────────────────────────────────────────
-    # Ziel: jeder Vereins-Spot mind. 1x, insgesamt genug um die Restzeit zu füllen.
+    # ── Sponsoren-Pool: gruppen-weise, gleichmäßig verteilt ───────────
+    # Jede Gruppe bekommt `rounds` Durchläufe, jeder Spot erscheint mind. 1x.
+    # Innerhalb einer Gruppe werden Spots reihum eingetragen (round-robin).
+    group_pools = {}  # key=(sponsor,typ) → list of spot-dicts (mit Wiederholungen)
+    for (sponsor, typ), grp in sponsoren_df.groupby(["Sponsor", "Typ"], sort=False):
+        pct = internal_pct.get(typ, 0)
+        if pct <= 0:
+            continue
+        group_total_dur = grp["Dauer"].sum()
+        rounds = max(1, math.ceil((loop_duration * (pct / 100)) / group_total_dur))
+        grp_spots = grp.to_dict("records")
+        pool = []
+        for r in range(rounds):
+            for spot in grp_spots:
+                pool.append({
+                    "id":      str(spot["id"]),
+                    "Name":    spot["Name"],
+                    "Dauer":   int(spot["Dauer"]),
+                    "Typ":     spot["Typ"],
+                    "Sponsor": spot["Sponsor"],
+                })
+        group_pools[(sponsor, typ)] = pool
+
+    # Alle Sponsor-Pools zusammenführen
+    s_pool = [item for pool in group_pools.values() for item in pool]
+
+    # ── Vereins-Pool ──────────────────────────────────────────────────
     v_list      = vereins_df.to_dict("records") if not vereins_df.empty else []
     v_instances = []
     if v_list:
         s_total_time = sum(s["Dauer"] for s in s_pool)
         remaining_s  = max(0.0, loop_duration - s_total_time)
         total_v_dur  = sum(v["Dauer"] for v in v_list)
-
-        # Wie viele vollständige Runden werden gebraucht?
-        if total_v_dur > 0 and remaining_s > 0:
-            full_rounds = max(1, math.ceil(remaining_s / total_v_dur))
-        else:
-            full_rounds = 1
-
+        full_rounds  = max(1, math.ceil(remaining_s / total_v_dur)) if total_v_dur > 0 and remaining_s > 0 else 1
         for _ in range(min(full_rounds, 500)):
             for v in v_list:
                 entry = dict(v)
-                entry["id"] = str(entry["id"])
+                entry["id"]      = str(entry["id"])
+                entry["Sponsor"] = entry.get("Sponsor", "Verein (Puffer)")
                 v_instances.append(entry)
 
-    # ── Anordnung ──────────────────────────────────────────────────────
+    # ── Anordnung: Sponsor-Gruppen gleichmäßig verteilen ─────────────
     pkg_order = {"XL": 1, "L": 2, "M": 3, "S": 4}
-    final_playlist = []
 
+    def interleave_by_sponsor(pool):
+        """Verteilt Spots gleichmäßig: gleiche Sponsoren möglichst weit auseinander."""
+        from collections import defaultdict, deque
+        groups = defaultdict(deque)
+        for s in pool:
+            groups[s["Sponsor"]].append(s)
+        result = []
+        while any(groups.values()):
+            for key in list(groups.keys()):
+                if groups[key]:
+                    result.append(groups[key].popleft())
+                else:
+                    del groups[key]
+        return result
+
+    final_playlist = []
     if play_mode == "Durchmischt":
-        random.shuffle(s_pool)
+        # Sponsor-Gruppen gleichmäßig verteilen, Verein dazwischen
+        s_interleaved = interleave_by_sponsor(s_pool)
         v_idx = 0
-        for s in s_pool:
+        for s in s_interleaved:
             final_playlist.append(s)
             if v_idx < len(v_instances):
                 final_playlist.append(v_instances[v_idx])
@@ -197,16 +247,14 @@ def generate_playlist(event: dict, play_mode: str):
         while v_idx < len(v_instances):
             final_playlist.append(v_instances[v_idx])
             v_idx += 1
-
     elif "zuerst" in play_mode:
         s_pool.sort(key=lambda x: pkg_order.get(x["Typ"], 5))
         final_playlist = s_pool + v_instances
-
-    else:  # Sponsoren zuletzt
+    else:
         s_pool.sort(key=lambda x: pkg_order.get(x["Typ"], 5))
         final_playlist = v_instances + s_pool
 
-    # ── DataFrame aufbauen ────────────────────────────────────────────
+    # ── DataFrame aufbauen ───────────────────────────────────────────
     res_df = pd.DataFrame(final_playlist)
     t_acc, start_times = 0, []
     for d in res_df["Dauer"]:
@@ -214,30 +262,51 @@ def generate_playlist(event: dict, play_mode: str):
         t_acc += d
     res_df.insert(0, "Start im Loop", start_times)
 
-    return res_df, loop_duration, None
+    return res_df, loop_duration, warning_msg
 
 
 # ─────────────────────────────────────────────
 #  TIMELINE-VISUALISIERUNG (Plotly)
 # ─────────────────────────────────────────────
+# Feste Farb-Palette für Sponsor-Gruppen
+_SPONSOR_COLORS = [
+    "#e63946","#f4a261","#2a9d8f","#457b9d","#e9c46a",
+    "#264653","#6a994e","#ff595e","#8ac926","#6a4c93",
+    "#1982c4","#ffca3a","#bc4749","#a8dadc","#3d405b",
+]
 TYP_COLORS = {
-    "S":              "#3498db",
-    "M":              "#2ecc71",
-    "L":              "#f39c12",
-    "XL":             "#e74c3c",
-    "Verein (Puffer)":"#95a5a6"
+    "S": "#457b9d", "M": "#2a9d8f", "L": "#f4a261",
+    "XL": "#e63946", "Verein (Puffer)": "#adb5bd"
 }
 
+def _sponsor_color_map(res_df: pd.DataFrame) -> dict:
+    cmap = {}
+    ci   = 0
+    col  = res_df["Sponsor"] if "Sponsor" in res_df.columns else res_df["Typ"]
+    for sponsor in col.unique():
+        if sponsor == "Verein (Puffer)":
+            cmap[sponsor] = "#adb5bd"
+        else:
+            cmap[sponsor] = _SPONSOR_COLORS[ci % len(_SPONSOR_COLORS)]
+            ci += 1
+    return cmap
+
 def show_timeline(res_df: pd.DataFrame):
-    fig = go.Figure()
-    t   = 0
+    fig      = go.Figure()
+    t        = 0
+    cmap     = _sponsor_color_map(res_df)
+    seen     = set()
+
     for _, row in res_df.iterrows():
-        color = TYP_COLORS.get(row["Typ"], "#cccccc")
-        label = str(row["Name"])[:18]
+        sponsor = row.get("Sponsor", row["Typ"]) if "Sponsor" in row.index else row["Typ"]
+        color   = cmap.get(sponsor, "#cccccc")
+        label   = str(row["Name"])[:18]
+        y_label = sponsor  # Zeile im Chart = Sponsor-Gruppe
+
         fig.add_trace(go.Bar(
             x=[row["Dauer"]],
             base=[t],
-            y=[row["Typ"]],
+            y=[y_label],
             orientation="h",
             marker_color=color,
             marker_line=dict(color="white", width=0.8),
@@ -246,14 +315,32 @@ def show_timeline(res_df: pd.DataFrame):
             insidetextanchor="middle",
             hovertemplate=(
                 f"<b>{row['Name']}</b><br>"
+                f"Sponsor: {sponsor}<br>"
                 f"Start: {row['Start im Loop']}<br>"
                 f"Dauer: {row['Dauer']} s<br>"
                 f"Typ: {row['Typ']}<extra></extra>"
             ),
-            showlegend=False,
-            name=row["Name"]
+            showlegend=sponsor not in seen,
+            legendgroup=sponsor,
+            name=sponsor,
         ))
+        seen.add(sponsor)
         t += row["Dauer"]
+
+    fig.update_layout(
+        title=dict(text="⏱️ Loop-Timeline", font=dict(size=16)),
+        xaxis=dict(title="Zeit (Sekunden)", tickformat="d"),
+        yaxis=dict(title=""),
+        barmode="stack",
+        height=max(280, 60 * len(cmap) + 80),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        plot_bgcolor="#0e1117",
+        paper_bgcolor="#0e1117",
+        font=dict(color="white"),
+        margin=dict(l=10, r=10, t=60, b=40)
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
 
     # Legende manuell
     for typ, col in TYP_COLORS.items():
@@ -815,7 +902,7 @@ if check_password():
         st.session_state.grassfish_config = {}
 
     st.set_page_config(page_title="Stadion Ad-Manager", layout="wide", page_icon="🏟️")
-    st.title("🏟️ Stadion Ad-Inventory Manager")
+    st.title("🏟️ Stadion Ad-Manager")
 
     # ─── TABS ──────────────────────────────────────────────────────────
     tab_events, tab_grassfish = st.tabs(["📋  Events & Playlisten", "🔌  Grassfish-Integration"])
@@ -826,6 +913,11 @@ if check_password():
     with tab_events:
 
         # ── SIDEBAR ────────────────────────────────────────────────────
+        st.sidebar.markdown(
+            f'<img src="data:image/jpeg;base64,{EVISCO_LOGO_B64}" '
+            'style="width:150px;display:block;margin-bottom:10px;">',
+            unsafe_allow_html=True
+        )
         st.sidebar.header("⚙️ Event-Verwaltung")
 
         if st.sidebar.button("💾 Alle Daten speichern"):
@@ -917,13 +1009,23 @@ if check_password():
             with st.expander("➕ Spot manuell hinzufügen", expanded=True):
                 with st.form("add_form", clear_on_submit=True):
                     c1, c2, c3 = st.columns([3, 1, 2])
-                    new_name = c1.text_input("Dateiname / Bezeichnung")
-                    new_dur  = c2.number_input("Dauer (Sek.)", min_value=1, value=30)
-                    new_pkg  = c3.selectbox("Typ", ["S", "M", "L", "XL", "Verein (Puffer)"])
+                    new_name    = c1.text_input("Dateiname / Bezeichnung")
+                    new_dur     = c2.number_input("Dauer (Sek.)", min_value=1, value=30)
+                    new_pkg     = c3.selectbox("Typ", ["S", "M", "L", "XL", "Verein (Puffer)"])
+                    # Sponsor-Bezeichnung (leer = kein Gruppen-Label)
+                    sponsor_existing = sorted(set(
+                        s.get("Sponsor", s["Typ"]) for s in spots
+                        if s["Typ"] != "Verein (Puffer)"
+                    ))
+                    new_sponsor = st.text_input(
+                        "Sponsor-Label (optional – für Gruppierung mehrerer Files)",
+                        placeholder="z.B. Allianz, Sponsor AG …"
+                    )
                     submitted = st.form_submit_button("➕ Hinzufügen")
 
                     if submitted:
                         stripped_name = new_name.strip()
+                        sponsor_val   = new_sponsor.strip() or new_pkg
                         if not stripped_name:
                             st.warning("Bitte einen Dateinamen eingeben.")
                         elif any(s["Name"] == stripped_name and s["Typ"] == new_pkg
@@ -934,10 +1036,11 @@ if check_password():
                             )
                         else:
                             spots.append({
-                                "id":    random.randint(10000, 99999),
-                                "Name":  stripped_name,
-                                "Dauer": new_dur,
-                                "Typ":   new_pkg
+                                "id":      random.randint(10000, 99999),
+                                "Name":    stripped_name,
+                                "Dauer":   new_dur,
+                                "Typ":     new_pkg,
+                                "Sponsor": sponsor_val,
                             })
                             save_data()
                             st.rerun()
@@ -945,9 +1048,11 @@ if check_password():
             # ── Spot-Liste anzeigen ────────────────────────────────────
             if spots:
                 for s_i, spot in enumerate(spots):
-                    cn, cd, ct, cb = st.columns([3, 1, 2, 1])
+                    cn, cd, ct, cs, cb = st.columns([3, 1, 1, 2, 1])
                     cn.text(spot["Name"])
                     cd.text(f"{spot['Dauer']} s")
+                    sponsor_lbl = spot.get("Sponsor", spot["Typ"])
+                    cs.caption(f"🏷 {sponsor_lbl}" if sponsor_lbl != spot["Typ"] else "")
                     ct.text(f"Typ: {spot['Typ']}")
                     if cb.button("🗑️", key=f"del_{ev_idx}_{s_i}_{spot['id']}",
                                  help="Spot entfernen"):
@@ -970,10 +1075,12 @@ if check_password():
             )
 
             if st.button("🎬 Playlist jetzt generieren", type="primary"):
-                res_df, loop_dur, err = generate_playlist(event, play_mode)
-                if err:
-                    st.error(err)
-                else:
+                res_df, loop_dur, _gen_msg = generate_playlist(event, play_mode)
+                if _gen_msg and not _gen_msg.startswith("⚠️"):
+                    st.error(_gen_msg)
+                else:  # no fatal error
+                    if _gen_msg and _gen_msg.startswith("⚠️"):
+                        st.warning(_gen_msg)
                     st.session_state[f"pl_{ev_idx}"]       = res_df
                     st.session_state[f"pl_dur_{ev_idx}"]   = loop_dur
 
@@ -1299,15 +1406,21 @@ if check_password():
                         iid   = str(item.get("Id",       item.get("id",       "")))
                         iname = str(item.get("Name",     item.get("name",     "?")))
                         idur  = _read_gf_duration(item, gf_cfg.get("dur_field_override") or None)
-                        cn, ct = st.columns([3, 2])
+                        cn, ct, cs = st.columns([3, 2, 2])
                         cn.caption(f"**{iname[:28]}**\n{idur} s | ID {iid}")
                         cls_val = ct.selectbox(
-                            "", ["Ignorieren", "S", "M", "L", "XL", "Verein (Puffer)"],
+                            "Typ", ["Ignorieren", "S", "M", "L", "XL", "Verein (Puffer)"],
                             key=f"cls_{c_i}_{iid}"
+                        )
+                        spon_val = cs.text_input(
+                            "Sponsor-Label",
+                            placeholder="z.B. Allianz",
+                            key=f"spon_{c_i}_{iid}"
                         )
                         st.session_state["gf_cls"][iid] = {
                             "name": iname, "duration": idur,
-                            "type": cls_val, "gf_id": iid
+                            "type": cls_val, "gf_id": iid,
+                            "sponsor": spon_val.strip()
                         }
 
                     if st.form_submit_button("✅ In Event übernehmen"):
@@ -1320,11 +1433,13 @@ if check_password():
                                    for s in tev["spots"]):
                                 dupes += 1
                                 continue
+                            sponsor_val = cd.get("sponsor") or cd["type"]
                             tev["spots"].append({
-                                "id":    cd["gf_id"],
-                                "Name":  cd["name"],
-                                "Dauer": int(cd["duration"]),
-                                "Typ":   cd["type"]
+                                "id":      cd["gf_id"],
+                                "Name":    cd["name"],
+                                "Dauer":   int(cd["duration"]),
+                                "Typ":     cd["type"],
+                                "Sponsor": sponsor_val,
                             })
                             added += 1
                         save_data()
