@@ -18,7 +18,7 @@ EVISCO_LOGO_B64 = "/9j/4AAQSkZJRgABAQEAYABgAAD/4QAiRXhpZgAATU0AKgAAAAgAAQESAAMAA
 #  KONFIGURATION & SICHERHEIT
 # ─────────────────────────────────────────────
 STORAGE_FILE = "data_storage.json"
-PASSWORD = "SGE#2026adds"          # Besser: st.secrets["password"] verwenden
+PASSWORD = "EV#2026adds"           # Besser: st.secrets["password"] verwenden
 MAX_V_ITER  = 2000                 # Schutz vor Endlosschleife beim Vereinspuffer
 
 
@@ -1021,26 +1021,27 @@ if check_password():
         )
         st.sidebar.header("⚙️ Event-Verwaltung")
 
-        # Ungespeichert-Anzeige + Speichern/Laden
+        # ── Speichern / Laden / Export / Import ───────────────────────
         unsaved = st.session_state.get("_unsaved", False)
         if unsaved:
             st.sidebar.warning("⚠️ Ungespeicherte Änderungen")
 
         c_save, c_load = st.sidebar.columns(2)
         if c_save.button("💾 Speichern", type="primary", use_container_width=True,
-                         help="Alle Daten, Events, Konfiguration und Playlisten speichern"):
+                         help="Alle Daten auf dem Server zwischenspeichern"):
             _write_to_disk()
-            st.rerun()
+            st.sidebar.success("✅ Gespeichert!")
+            # kein rerun → Spots bleiben sichtbar
 
         if c_load.button("📂 Laden", type="secondary", use_container_width=True,
-                         help="Zuletzt gespeicherten Stand vollständig laden"):
+                         help="Gespeicherten Stand vom Server laden"):
             if st.session_state.get("_unsaved"):
                 st.session_state["_confirm_load"] = True
             else:
                 load_data()
                 st.rerun()
 
-        # Bestätigung falls ungespeicherte Änderungen vorhanden
+        # Bestätigung für Laden bei ungespeicherten Änderungen
         if st.session_state.get("_confirm_load"):
             st.sidebar.error("⚠️ Ungespeicherte Änderungen gehen verloren!")
             cc1, cc2 = st.sidebar.columns(2)
@@ -1051,6 +1052,61 @@ if check_password():
             if cc2.button("Abbrechen", key="btn_cancel_load"):
                 st.session_state.pop("_confirm_load", None)
                 st.rerun()
+
+        st.sidebar.divider()
+
+        # ── Daten exportieren / importieren ────────────────────────────
+        # Wichtig: Streamlit Cloud setzt das Filesystem bei Neustarts zurück.
+        # Daher: Daten als JSON herunterladen (lokal sichern) und wieder hochladen.
+        with st.sidebar.expander("💿 Daten exportieren / importieren"):
+            # Export
+            export_data = {
+                "events":           st.session_state.get("events", []),
+                "grassfish_config": st.session_state.get("grassfish_config", {}),
+                "playlists":        [
+                    {"df": st.session_state[f"pl_{i}"].to_dict(orient="records"),
+                     "dur": st.session_state[f"pl_dur_{i}"]}
+                    if f"pl_{i}" in st.session_state else None
+                    for i in range(len(st.session_state.get("events", [])))
+                ],
+            }
+            export_bytes = json.dumps(export_data, ensure_ascii=False, indent=2).encode("utf-8")
+            st.download_button(
+                label="⬇️ Alle Daten herunterladen",
+                data=export_bytes,
+                file_name="stadion_admanager_backup.json",
+                mime="application/json",
+                use_container_width=True,
+                help="Speichert alle Events, Spots, GF-Konfiguration und Playlisten als JSON-Datei auf deinem Gerät."
+            )
+
+            st.caption("Gespeicherte JSON-Datei wieder hochladen:")
+            uploaded = st.file_uploader(
+                "JSON-Datei hochladen",
+                type=["json"],
+                key="import_json",
+                label_visibility="collapsed"
+            )
+            if uploaded is not None:
+                if st.button("✅ Importieren & laden", key="btn_do_import",
+                             use_container_width=True):
+                    try:
+                        data = json.loads(uploaded.read().decode("utf-8"))
+                        # Alte Playlist-Keys löschen
+                        for k in [k for k in st.session_state if k.startswith("pl_")]:
+                            del st.session_state[k]
+                        st.session_state.events           = data.get("events", [])
+                        st.session_state.grassfish_config = _migrate_grassfish_config(
+                            data.get("grassfish_config", {}))
+                        for i, pl_data in enumerate(data.get("playlists", [])):
+                            if pl_data:
+                                st.session_state[f"pl_{i}"]     = pd.DataFrame(pl_data["df"])
+                                st.session_state[f"pl_dur_{i}"] = pl_data["dur"]
+                        st.session_state["_unsaved"] = False
+                        _write_to_disk()   # sofort auf Server sichern
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Import fehlgeschlagen: {e}")
 
         if st.sidebar.button("🚪 Abmelden"):
             st.session_state.authenticated = False
@@ -1072,17 +1128,23 @@ if check_password():
                     save_data()
                     st.rerun()
 
-        sel_ev_name = st.sidebar.selectbox("Aktives Event", event_names, key="sel_event")
-        ev_idx      = event_names.index(sel_ev_name)
-        event       = st.session_state.events[ev_idx]
+        # Aktiven Event-Namen persistent halten → kein Index-Sprung nach rerun
+        _saved_ev = st.session_state.get("_active_event")
+        _default_idx = event_names.index(_saved_ev) if _saved_ev in event_names else 0
+        sel_ev_name = st.sidebar.selectbox(
+            "Aktives Event", event_names,
+            index=_default_idx,
+            key="sel_event"
+        )
+        st.session_state["_active_event"] = sel_ev_name
+        ev_idx = event_names.index(sel_ev_name)
+        event  = st.session_state.events[ev_idx]
 
         if len(st.session_state.events) > 1:
             if st.sidebar.button(f"🗑️ '{sel_ev_name}' löschen"):
                 st.session_state.events.pop(ev_idx)
                 save_data()
                 st.rerun()
-
-        st.sidebar.divider()
 
         # ── Konfiguration des aktiven Events ──────────────────────────
         st.sidebar.subheader("📐 Konfiguration")
