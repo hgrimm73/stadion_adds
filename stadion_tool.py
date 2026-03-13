@@ -180,32 +180,31 @@ def generate_playlist(event: dict, play_mode: str):
 
     pct_scope = cfg.get("pct_scope", "Loop")
 
-    if pct_scope == "Event-Laufzeit":
-        # Modus "Prozent der Event-Laufzeit":
-        # Loop = gesamte Event-Dauer. Jeder Sponsor bekommt so viele Wiederholungen
-        # wie nötig, damit er über die gesamte Event-Dauer seinen %-Anteil erfüllt.
-        loop_duration = event_max_s
-    else:
-        # ── Gruppen-basierte Loop-Berechnung (minimaler Loop) ─────────────
-        # Gruppe = eindeutiger (Sponsor, Typ). Alle Files einer Gruppe teilen sich den %-Anteil.
-        # Mindest-Loop: die Gruppe muss so lang sein, dass alle Spots mind. 1x passen.
-        group_min_loops = []
-        for (sponsor, typ), grp in sponsoren_df.groupby(["Sponsor", "Typ"], sort=False):
-            pct = internal_pct.get(typ, 0)
-            if pct <= 0:
-                continue
-            group_total_dur = grp["Dauer"].sum()
-            min_loop = group_total_dur / (pct / 100)
-            group_min_loops.append(min_loop)
+    # Beide Modi (Loop-Durchlauf + Event-Laufzeit) nutzen denselben minimalen
+    # Loop-Algorithmus. Der Unterschied ist rein konzeptuell für den User:
+    # "Loop-Durchlauf"  → 5% des Loops soll dieser Sponsor ausmachen
+    # "Event-Laufzeit"  → 5% des Events soll dieser Sponsor ausmachen
+    # Mathematisch ist loop = group_total_dur / (pct/100) in beiden Fällen identisch.
+    # Der loop wiederholt sich dann event_max_s/loop_duration mal.
 
-        base_loop = max(group_min_loops) if group_min_loops else event_max_s
+    # ── Gruppen-basierte Loop-Berechnung (minimaler Loop) ─────────────────
+    group_min_loops = []
+    for (sponsor, typ), grp in sponsoren_df.groupby(["Sponsor", "Typ"], sort=False):
+        pct = internal_pct.get(typ, 0)
+        if pct <= 0:
+            continue
+        group_total_dur = grp["Dauer"].sum()
+        min_loop = group_total_dur / (pct / 100)
+        group_min_loops.append(min_loop)
 
-        min_v_time  = vereins_df["Dauer"].sum() if not vereins_df.empty else 0
-        s_pct_sum   = sum(internal_pct.get(t, 0) for t in sponsoren_df["Typ"].unique())
-        v_pct_avail = max(0.01, 100.0 - s_pct_sum)
-        loop_for_v  = (min_v_time / (v_pct_avail / 100)) if min_v_time > 0 else base_loop
+    base_loop = max(group_min_loops) if group_min_loops else event_max_s
 
-        loop_duration = min(max(base_loop, loop_for_v), event_max_s)
+    min_v_time  = vereins_df["Dauer"].sum() if not vereins_df.empty else 0
+    s_pct_sum   = sum(internal_pct.get(t, 0) for t in sponsoren_df["Typ"].unique())
+    v_pct_avail = max(0.01, 100.0 - s_pct_sum)
+    loop_for_v  = (min_v_time / (v_pct_avail / 100)) if min_v_time > 0 else base_loop
+
+    loop_duration = min(max(base_loop, loop_for_v), event_max_s)
 
     # ── Warnung wenn Playlist durch Mindest-1x-Bedingung sehr groß wird ──
     warning_msg = None
@@ -339,7 +338,7 @@ def generate_playlist(event: dict, play_mode: str):
         t_acc += d
     res_df.insert(0, "Start im Loop", start_times)
 
-    return res_df, loop_duration, warning_msg
+    return res_df, loop_duration, warning_msg, event_max_s
 
 
 # ─────────────────────────────────────────────
@@ -1172,8 +1171,8 @@ if check_password():
                 key=f"pct_scope_{ev_idx}",
                 help=(
                     "**Loop-Durchlauf**: minimaler Loop wird berechnet, Playlist ist kompakt.\n\n"
-                    "**Event-Laufzeit**: Playlist wird so gebaut, dass über die gesamte "
-                    "Event-Dauer die gebuchten Prozente erreicht werden → größere Playlist."
+                    "**Event-Laufzeit**: Die Prozentzahl bezieht sich auf die Gesamt-Event-Dauer. "
+                    "Der Loop bleibt trotzdem minimal – das Tool zeigt dir wie oft er sich wiederholt."
                 )
             )
             cfg["pct_scope"] = "Event-Laufzeit" if pct_scope == "die gesamte Event-Laufzeit" else "Loop"
@@ -1299,14 +1298,15 @@ if check_password():
             )
 
             if st.button("🎬 Playlist jetzt generieren", type="primary"):
-                res_df, loop_dur, _gen_msg = generate_playlist(event, play_mode)
+                res_df, loop_dur, _gen_msg, _ev_max_s = generate_playlist(event, play_mode)
                 if _gen_msg and not _gen_msg.startswith("⚠️"):
                     st.error(_gen_msg)
                 else:
                     if _gen_msg and _gen_msg.startswith("⚠️"):
                         st.warning(_gen_msg)
-                    st.session_state[f"pl_{ev_idx}"]     = res_df
-                    st.session_state[f"pl_dur_{ev_idx}"] = loop_dur
+                    st.session_state[f"pl_{ev_idx}"]        = res_df
+                    st.session_state[f"pl_dur_{ev_idx}"]   = loop_dur
+                    st.session_state[f"pl_evmax_{ev_idx}"] = _ev_max_s
                     if loop_dur > 600:  # > 10 Minuten
                         st.session_state[f"pl_longwarn_{ev_idx}"] = True
                     else:
@@ -1322,9 +1322,18 @@ if check_password():
                     st.warning(f"⚠️ Achtung! Die Playliste ist bereits länger als 10 Minuten! (Loop-Dauer: {int(loop_dur//60)} m {int(loop_dur%60)} s)")
 
                 c1, c2, c3 = st.columns(3)
+                ev_max_s   = st.session_state.get(f"pl_evmax_{ev_idx}", loop_dur)
+                repeats    = ev_max_s / loop_dur if loop_dur > 0 else 1
+
                 c1.success(f"⏱ Loop-Dauer: **{int(loop_dur//60)} m {int(loop_dur%60)} s**")
                 c2.info(f"📦 Spots in Playlist: **{len(res_df)}**")
                 c3.info(f"🕐 Gesamtlaufzeit: **{total_s} s**")
+                if ev_max_s > loop_dur * 1.5:
+                    st.info(
+                        f"🔁 Der Loop wiederholt sich ca. **{repeats:.1f}×** "
+                        f"während des Events ({int(ev_max_s//60)} min). "
+                        f"Jeder Sponsor erfüllt seine Vorgabe pro Wiederholung."
+                    )
 
                 # Timeline
                 show_timeline(res_df)
