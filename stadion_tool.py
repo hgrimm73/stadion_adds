@@ -828,6 +828,60 @@ def gf_fetch_swagger_endpoints(server: str, api_key: str, version: str) -> list:
             pass
     return []
 
+def gf_create_playlist_version(server: str, api_key: str, version: str,
+                               pl_id, valid_from_iso: str) -> tuple:
+    """
+    Erstellt eine neue Version einer bestehenden Playlist.
+    Probiert alle bekannten Endpunkt-Varianten durch.
+    Gibt (neue_version_id, url_verwendet, log) zurück, oder (None, None, log) bei Fehler.
+    """
+    hdrs = _gf_headers(api_key)
+    log  = []
+    vers = [version] + [v for v in ["1.19", "1.18", "1.12"] if v != version]
+
+    # Mögliche Body-Varianten (ValidFrom als ISO-8601-String)
+    bodies = [
+        {"PlaylistId": int(pl_id), "ValidFrom": valid_from_iso},
+        {"PlaylistId": int(pl_id), "ValidFrom": valid_from_iso, "Status": "Draft"},
+        {"PlaylistId": int(pl_id), "ValidFrom": valid_from_iso, "Status": "Released"},
+        {"PlaylistId": str(pl_id), "ValidFrom": valid_from_iso},
+    ]
+    # Mögliche Endpunkte
+    paths = [
+        f"PlaylistVersions",
+        f"Playlists/{pl_id}/Versions",
+        f"Playlists/{pl_id}/PlaylistVersions",
+    ]
+
+    for ver in vers:
+        for path in paths:
+            url = f"{_gf_base(server, ver)}/{path}"
+            for body in bodies:
+                try:
+                    resp = requests.post(url, json=body, headers=hdrs, timeout=15)
+                    log.append((f"POST {url}", resp.status_code, str(body)[:120]))
+                    if resp.status_code in (200, 201):
+                        # Neue Version-ID aus Antwort lesen
+                        try:
+                            data   = resp.json()
+                            new_id = (data.get("Id") or data.get("id") or
+                                      data.get("VersionId") or data.get("versionId") or
+                                      (data.get("ActiveVersion") or {}).get("Id"))
+                            if new_id:
+                                log.append((f"→ Neue Version-ID: {new_id}", 0, ""))
+                                return str(new_id), url, log
+                        except Exception:
+                            pass
+                        # Kein JSON / kein ID-Feld → trotzdem als Erfolg werten
+                        log.append(("→ Keine Version-ID in Antwort – nutze pl_id als Fallback", 0, ""))
+                        return str(pl_id), url, log
+                    elif resp.status_code == 404:
+                        break  # Endpunkt existiert nicht → nächsten probieren
+                except Exception as e:
+                    log.append((f"POST {url}", str(e), str(body)[:80]))
+    return None, None, log
+
+
 def gf_push_playlist(server: str, api_key: str, version: str, pl_id, spot_ids: list, version_id=None, playlist_obj=None, spot_durations: dict = None) -> tuple:
     """
     Überträgt Spots in die Playlist.
@@ -1625,10 +1679,30 @@ if check_password():
                     sel_pl_name = st.selectbox("Ziel-Playlist in Grassfish", list(pl_map.keys()))
                     sel_pl_id   = pl_map[sel_pl_name]
 
-                    clear_opt = st.checkbox("Playlist vorher leeren", value=True,
-                                             help="Empfohlen, um Fehler durch veraltete Einträge zu vermeiden.")
+                    st.divider()
+                    st.markdown("#### 📅 Neue Playlist-Version")
+                    st.caption(
+                        "In Grassfish wird eine **neue Version** der Playlist erstellt – "
+                        "die bisherige bleibt erhalten und ist jederzeit nachvollziehbar."
+                    )
 
-                    if st.button("🚀 Playlist übertragen", type="primary"):
+                    import datetime as _dt
+                    col_d, col_t = st.columns(2)
+                    valid_date = col_d.date_input(
+                        "Gültig ab – Datum",
+                        value=_dt.date.today(),
+                        key="push_valid_date"
+                    )
+                    valid_time = col_t.time_input(
+                        "Gültig ab – Uhrzeit",
+                        value=_dt.time(0, 0),
+                        key="push_valid_time",
+                        step=300,   # 5-Min-Schritte
+                    )
+                    valid_from_iso = _dt.datetime.combine(valid_date, valid_time).strftime("%Y-%m-%dT%H:%M:%S")
+                    st.caption(f"ValidFrom: `{valid_from_iso}`")
+
+                    if st.button("🚀 Neue Version erstellen & übertragen", type="primary"):
                         _key = gf_cfg.get("api_key", "")
                         _ver = st.session_state.get("gf_pl_version", gf_cfg.get("version", "1.19"))
                         if not _key:
@@ -1637,34 +1711,54 @@ if check_password():
                             spot_ids = res_push["id"].tolist()
                             push_log = []
                             try:
-                                ver_map   = st.session_state.get("gf_pl_ver_map", {})
+                                ver_map    = st.session_state.get("gf_pl_ver_map", {})
                                 version_id = ver_map.get(str(sel_pl_id), sel_pl_id)
-                                with st.spinner("Übertrage …"):
-                                    if clear_opt:
-                                        ok_c, url_c, log_c = gf_clear_playlist(gf_url, _key, _ver, sel_pl_id, version_id)
-                                        push_log += [(f"DELETE {u}", s, "") for u, s in log_c]
-                                        if not ok_c:
-                                            st.warning("⚠️ Playlist konnte nicht geleert werden – fahre trotzdem fort.")
-                                    # Dauer je Spot (id→sekunden) mitgeben
-                                    spot_dur_map = {}
-                                    if "id" in res_push.columns and "Dauer" in res_push.columns:
-                                        for _, row in res_push.iterrows():
-                                            spot_dur_map[str(row["id"])] = int(row["Dauer"])
-                                    ok_p, url_p, log_p = gf_push_playlist(gf_url, _key, _ver, sel_pl_id, spot_ids, version_id, spot_durations=spot_dur_map)
+
+                                with st.spinner("Schritt 1/2 – Neue Playlist-Version erstellen …"):
+                                    new_vid, create_url, create_log = gf_create_playlist_version(
+                                        gf_url, _key, _ver, sel_pl_id, valid_from_iso
+                                    )
+                                    push_log += create_log
+
+                                if new_vid:
+                                    st.info(f"✅ Neue Version erstellt (ID: `{new_vid}`) via `{create_url}`")
+                                    use_vid = new_vid
+                                else:
+                                    st.warning(
+                                        "⚠️ Neue Version konnte nicht automatisch erstellt werden. "
+                                        "Versuche, direkt in die aktive Version zu schreiben …"
+                                    )
+                                    use_vid = version_id
+
+                                # Dauer je Spot (id→sekunden) mitgeben
+                                spot_dur_map = {}
+                                if "id" in res_push.columns and "Dauer" in res_push.columns:
+                                    for _, row in res_push.iterrows():
+                                        spot_dur_map[str(row["id"])] = int(row["Dauer"])
+
+                                with st.spinner(f"Schritt 2/2 – {len(spot_ids)} Spots übertragen …"):
+                                    ok_p, url_p, log_p = gf_push_playlist(
+                                        gf_url, _key, _ver, sel_pl_id, spot_ids,
+                                        version_id=use_vid, spot_durations=spot_dur_map
+                                    )
                                     push_log += log_p
+
                                 if ok_p:
                                     st.success(f"✅ {len(spot_ids)} Spots übertragen via `{url_p}`")
                                     st.balloons()
                                 else:
                                     st.error("❌ Kein funktionierender Push-Endpunkt gefunden.")
-                                    with st.expander("🔍 Debug: Push-Versuche", expanded=True):
-                                        for entry in push_log:
-                                            url_e = entry[0]; status_e = entry[1]
-                                            body_e = entry[2] if len(entry) > 2 else ""
-                                            icon = "✅" if str(status_e) in ("200","201","204") else "❌"
-                                            st.caption(f"{icon} `{status_e}` → {url_e}")
-                                            if body_e:
-                                                st.caption(f"   Body: `{body_e}`")
+
+                                with st.expander("🔍 Debug: alle API-Aufrufe"):
+                                    for entry in push_log:
+                                        url_e    = entry[0]
+                                        status_e = entry[1]
+                                        body_e   = entry[2] if len(entry) > 2 else ""
+                                        icon = "✅" if str(status_e) in ("200","201","204") else (
+                                               "ℹ️" if str(status_e) == "0" else "❌")
+                                        st.caption(f"{icon} `{status_e}` → {url_e}")
+                                        if body_e:
+                                            st.caption(f"   Body: `{body_e}`")
                             except Exception as e:
                                 st.error(f"Fehler: {e}")
                                 with st.expander("🔍 Debug"):
