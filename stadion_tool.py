@@ -1755,16 +1755,26 @@ if check_password():
                         value=_dt.date.today(),
                         key="push_valid_date"
                     )
-                    valid_time = col_t.time_input(
-                        "Gültig ab – Uhrzeit",
-                        value=_dt.time(0, 0),
+                    valid_time_str = col_t.text_input(
+                        "Gültig ab – Uhrzeit (HH:MM)",
+                        value="00:00",
                         key="push_valid_time",
-                        step=300,   # 5-Min-Schritte
+                        placeholder="z.B. 08:00",
+                        help="Uhrzeit im Format HH:MM, z.B. 08:30"
                     )
-                    valid_from_iso = _dt.datetime.combine(valid_date, valid_time).strftime("%Y-%m-%dT%H:%M:%S")
-                    st.caption(f"ValidFrom: `{valid_from_iso}`")
+                    # Uhrzeit parsen mit Fehlerbehandlung
+                    try:
+                        valid_time = _dt.datetime.strptime(valid_time_str.strip(), "%H:%M").time()
+                        valid_from_iso = _dt.datetime.combine(valid_date, valid_time).strftime("%Y-%m-%dT%H:%M:%S")
+                        st.caption(f"ValidFrom: `{valid_from_iso}`")
+                        _time_ok = True
+                    except ValueError:
+                        st.warning("⚠️ Ungültiges Zeitformat – bitte HH:MM eingeben, z.B. `08:30`")
+                        _time_ok = False
+                        valid_from_iso = None
 
-                    if st.button("🚀 Neue Version erstellen & übertragen", type="primary"):
+                    if st.button("🚀 Neue Version erstellen & übertragen", type="primary",
+                                disabled=not _time_ok):
                         _key = gf_cfg.get("api_key", "")
                         _ver = st.session_state.get("gf_pl_version", gf_cfg.get("version", "1.19"))
                         if not _key:
