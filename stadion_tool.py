@@ -118,7 +118,7 @@ def _reset_session():
 def _migrate_grassfish_config(cfg: dict) -> dict:
     """Migriert alte Configs – stellt sicher dass Version nicht '1' ist."""
     if cfg.get("version") == "1":
-        cfg["version"] = "1.12"
+        cfg["version"] = "1.19"
     return cfg
 
 
@@ -1201,7 +1201,7 @@ if check_password():
                     c1, c2, c3 = st.columns([3, 1, 2])
                     new_name    = c1.text_input("Dateiname / Bezeichnung")
                     new_dur     = c2.number_input("Dauer (Sek.)", min_value=1, value=30)
-                    new_pkg     = c3.selectbox("Typ", ["S", "M", "L", "XL", "Verein (Puffer)"])
+                    new_pkg     = c3.selectbox("Typ", ["Verein (Puffer)", "S", "M", "L", "XL"])
                     # Sponsor-Bezeichnung (leer = kein Gruppen-Label)
                     sponsor_existing = sorted(set(
                         s.get("Sponsor", s["Typ"]) for s in spots
@@ -1384,7 +1384,7 @@ if check_password():
                                          placeholder="https://ihr-server.com")
             gf_api_key = cg2.text_input("API-Key (X-ApiKey)", value=gf_cfg.get("api_key", ""),
                                          type="password", placeholder="Dein Grassfish API-Key")
-            gf_version = cg3.text_input("API-Version", value=gf_cfg.get("version", "1.12"),
+            gf_version = cg3.text_input("API-Version", value=gf_cfg.get("version", "1.19"),
                                          help="Standard: 1.12  (für ältere Instanzen ggf. 1)")
 
             gf_cfg["url"]     = gf_url
@@ -1477,7 +1477,7 @@ if check_password():
         with step1:
             st.subheader("1️⃣  Content importieren")
             _key = gf_cfg.get("api_key", "")
-            _ver = gf_cfg.get("version", "1.12")
+            _ver = gf_cfg.get("version", "1.19")
 
             # Ordner-Browser
             if st.button("🗂️ Verfügbare Ordner (SpotGroups) anzeigen", key="btn_browse_folders"):
@@ -1615,7 +1615,7 @@ if check_password():
                         cn, ct, cs = st.columns([3, 2, 2])
                         cn.caption(f"**{iname[:28]}**\n{idur} s | ID {iid}")
                         cls_val = ct.selectbox(
-                            "Typ", ["Ignorieren", "S", "M", "L", "XL", "Verein (Puffer)"],
+                            "Typ", ["Verein (Puffer)", "Ignorieren", "S", "M", "L", "XL"],
                             key=f"cls_{c_i}_{iid}"
                         )
                         spon_val = cs.text_input(
@@ -1678,7 +1678,7 @@ if check_password():
                         if manual_pl_id.strip():
                             mname = manual_pl_name.strip() or f"Playlist {manual_pl_id}"
                             st.session_state["gf_playlists"]  = [{"Id": manual_pl_id.strip(), "Name": mname}]
-                            st.session_state["gf_pl_version"] = gf_cfg.get("version", "1.12")
+                            st.session_state["gf_pl_version"] = gf_cfg.get("version", "1.19")
                             st.success(f"Playlist gesetzt: {mname} (ID {manual_pl_id})")
                             st.rerun()
                         else:
