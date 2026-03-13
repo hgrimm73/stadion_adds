@@ -178,26 +178,34 @@ def generate_playlist(event: dict, play_mode: str):
 
     event_max_s = cfg["total_event_min"] * 60
 
-    # ── Gruppen-basierte Loop-Berechnung ──────────────────────────────
-    # Gruppe = eindeutiger (Sponsor, Typ). Alle Files einer Gruppe teilen sich den %-Anteil.
-    # Mindest-Loop: die Gruppe muss so lang sein, dass alle Spots mind. 1x passen.
-    group_min_loops = []
-    for (sponsor, typ), grp in sponsoren_df.groupby(["Sponsor", "Typ"], sort=False):
-        pct = internal_pct.get(typ, 0)
-        if pct <= 0:
-            continue
-        group_total_dur = grp["Dauer"].sum()  # eine Runde durch alle Gruppe-Spots
-        min_loop = group_total_dur / (pct / 100)
-        group_min_loops.append(min_loop)
+    pct_scope = cfg.get("pct_scope", "Loop")
 
-    base_loop = max(group_min_loops) if group_min_loops else event_max_s
+    if pct_scope == "Event-Laufzeit":
+        # Modus "Prozent der Event-Laufzeit":
+        # Loop = gesamte Event-Dauer. Jeder Sponsor bekommt so viele Wiederholungen
+        # wie nötig, damit er über die gesamte Event-Dauer seinen %-Anteil erfüllt.
+        loop_duration = event_max_s
+    else:
+        # ── Gruppen-basierte Loop-Berechnung (minimaler Loop) ─────────────
+        # Gruppe = eindeutiger (Sponsor, Typ). Alle Files einer Gruppe teilen sich den %-Anteil.
+        # Mindest-Loop: die Gruppe muss so lang sein, dass alle Spots mind. 1x passen.
+        group_min_loops = []
+        for (sponsor, typ), grp in sponsoren_df.groupby(["Sponsor", "Typ"], sort=False):
+            pct = internal_pct.get(typ, 0)
+            if pct <= 0:
+                continue
+            group_total_dur = grp["Dauer"].sum()
+            min_loop = group_total_dur / (pct / 100)
+            group_min_loops.append(min_loop)
 
-    min_v_time  = vereins_df["Dauer"].sum() if not vereins_df.empty else 0
-    s_pct_sum   = sum(internal_pct.get(t, 0) for t in sponsoren_df["Typ"].unique())
-    v_pct_avail = max(0.01, 100.0 - s_pct_sum)
-    loop_for_v  = (min_v_time / (v_pct_avail / 100)) if min_v_time > 0 else base_loop
+        base_loop = max(group_min_loops) if group_min_loops else event_max_s
 
-    loop_duration = min(max(base_loop, loop_for_v), event_max_s)
+        min_v_time  = vereins_df["Dauer"].sum() if not vereins_df.empty else 0
+        s_pct_sum   = sum(internal_pct.get(t, 0) for t in sponsoren_df["Typ"].unique())
+        v_pct_avail = max(0.01, 100.0 - s_pct_sum)
+        loop_for_v  = (min_v_time / (v_pct_avail / 100)) if min_v_time > 0 else base_loop
+
+        loop_duration = min(max(base_loop, loop_for_v), event_max_s)
 
     # ── Warnung wenn Playlist durch Mindest-1x-Bedingung sehr groß wird ──
     warning_msg = None
@@ -1152,9 +1160,26 @@ if check_password():
 
         input_mode = st.sidebar.radio(
             "Berechnungs-Basis", ["Prozent", "Laufzeit (Minuten)"],
-            index=0 if cfg["input_mode"] == "Prozent" else 1,
+            index=0 if cfg["input_mode"] in ("Prozent", "Prozent (Event-Laufzeit)") else 1,
             key=f"mode_{ev_idx}"
         )
+
+        if input_mode == "Prozent":
+            pct_scope = st.sidebar.radio(
+                "Prozent bezieht sich auf",
+                ["einen Loop-Durchlauf", "die gesamte Event-Laufzeit"],
+                index=1 if cfg.get("pct_scope") == "Event-Laufzeit" else 0,
+                key=f"pct_scope_{ev_idx}",
+                help=(
+                    "**Loop-Durchlauf**: minimaler Loop wird berechnet, Playlist ist kompakt.\n\n"
+                    "**Event-Laufzeit**: Playlist wird so gebaut, dass über die gesamte "
+                    "Event-Dauer die gebuchten Prozente erreicht werden → größere Playlist."
+                )
+            )
+            cfg["pct_scope"] = "Event-Laufzeit" if pct_scope == "die gesamte Event-Laufzeit" else "Loop"
+        else:
+            cfg["pct_scope"] = "Loop"
+
         cfg["input_mode"] = input_mode
 
         total_min = st.sidebar.number_input(
