@@ -1209,7 +1209,7 @@ if check_password():
                     ))
                     new_sponsor = st.text_input(
                         "Sponsor-Label (optional – für Gruppierung mehrerer Files)",
-                        placeholder="z.B. Allianz, Sponsor AG …"
+                        placeholder="z.B. Indeed, Sponsor AG …"
                     )
                     submitted = st.form_submit_button("➕ Hinzufügen")
 
@@ -1385,7 +1385,7 @@ if check_password():
             gf_api_key = cg2.text_input("API-Key (X-ApiKey)", value=gf_cfg.get("api_key", ""),
                                          type="password", placeholder="Dein Grassfish API-Key")
             gf_version = cg3.text_input("API-Version", value=gf_cfg.get("version", "1.19"),
-                                         help="Standard: 1.12  (für ältere Instanzen ggf. 1)")
+                                         help="Standard: 1.19  (für ältere Instanzen ggf. 1.12)")
 
             gf_cfg["url"]     = gf_url
             gf_cfg["api_key"] = gf_api_key
@@ -1620,7 +1620,7 @@ if check_password():
                         )
                         spon_val = cs.text_input(
                             "Sponsor-Label",
-                            placeholder="z.B. Allianz",
+                            placeholder="z.B. Indeed",
                             key=f"spon_{c_i}_{iid}"
                         )
                         st.session_state["gf_cls"][iid] = {
